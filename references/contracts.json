@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Repo-Portfolio evidence contract vocabulary",
+  "schema_version": "1.0",
+  "claim": {
+    "required": [
+      "id",
+      "category",
+      "claim",
+      "status",
+      "sources",
+      "career_signals",
+      "public_safe",
+      "sensitive",
+      "supports",
+      "contradicts"
+    ],
+    "id_pattern": "^[A-Z]+-[0-9]{3,}$",
+    "statuses": [
+      "CONFIRMED",
+      "USER_CONFIRMED",
+      "USER_ESTIMATE",
+      "STRONG_INFERENCE",
+      "WEAK_INFERENCE",
+      "USER_CONFIRMATION_REQUIRED",
+      "UNKNOWN",
+      "CONTRADICTED"
+    ],
+    "source_types": [
+      "SOURCE_CODE",
+      "TEST",
+      "CONFIG",
+      "BUILD_OR_PACKAGE_METADATA",
+      "GIT_HISTORY",
+      "DOCUMENTATION",
+      "SCREENSHOT",
+      "VIDEO",
+      "USER_ATTESTATION",
+      "USER_ESTIMATE",
+      "INFERENCE"
+    ]
+  },
+  "project_required_keys": [
+    "project",
+    "problem",
+    "users",
+    "workflows",
+    "technology",
+    "architecture",
+    "automation",
+    "testing",
+    "delivery",
+    "maintenance",
+    "ownership",
+    "impact",
+    "decisions",
+    "career_signals",
+    "unknowns",
+    "extensions"
+  ],
+  "required_outputs": [
+    "dossier.md",
+    "project.json",
+    "observed_evidence.json",
+    "interview_evidence.json",
+    "evidence.json",
+    "open_questions.md",
+    "public_safe_summary.md",
+    "media/media_index.json",
+    "media/extracted_frames/"
+  ]
+}

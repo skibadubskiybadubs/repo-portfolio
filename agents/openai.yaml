@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo-Portfolio"
+  short_description: "Mine defensible evidence from software projects"
+  default_prompt: "Use $repo-portfolio to analyze this project and produce a provenance-backed, resumable evidence dossier."
