@@ -23,6 +23,12 @@
       "dimensions", "normalized", "snapshot_id", "currency",
       "derived_from_claim_ids", "notes", "origin"
     ],
+    "explicit_status_required_for": ["observed", "canonical"],
+    "interview_default_status": "USER_CONFIRMED",
+    "reference_required_source_types": [
+      "SOURCE_CODE", "TEST", "CONFIG", "BUILD_OR_PACKAGE_METADATA",
+      "GIT_HISTORY", "DOCUMENTATION", "SCREENSHOT", "VIDEO"
+    ],
     "id_pattern": "^[A-Z]+-[0-9]{3,}$",
     "statuses": [
       "CONFIRMED", "USER_CONFIRMED", "USER_ESTIMATE", "STRONG_INFERENCE",

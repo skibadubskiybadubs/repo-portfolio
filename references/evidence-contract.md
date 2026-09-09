@@ -14,6 +14,10 @@ Every claim retains `id`, `category`, `claim`, approved `status`, `sources`, `ca
 
 Use project-relative artifact references. Remote media evidence must use the original URL as `reference`; behavioral video evidence also needs `timestamp_seconds` and may include title.
 
+Observed and canonical claims must supply `status` explicitly; an omitted, null, or blank status is invalid and is never promoted to `CONFIRMED`. Interview-path claims may retain the intentional `USER_CONFIRMED` default and question-based user provenance.
+
+`SOURCE_CODE`, `TEST`, `CONFIG`, `BUILD_OR_PACKAGE_METADATA`, `GIT_HISTORY`, `DOCUMENTATION`, `SCREENSHOT`, and `VIDEO` sources require a non-empty string `reference` identifying the artifact. `USER_ATTESTATION` and `USER_ESTIMATE` continue to use interview-question provenance and are not required to provide a file path.
+
 Statuses remain `CONFIRMED`, `USER_CONFIRMED`, `USER_ESTIMATE`, `STRONG_INFERENCE`, `WEAK_INFERENCE`, `USER_CONFIRMATION_REQUIRED`, `UNKNOWN`, and `CONTRADICTED`.
 
 Source types remain `SOURCE_CODE`, `TEST`, `CONFIG`, `BUILD_OR_PACKAGE_METADATA`, `GIT_HISTORY`, `DOCUMENTATION`, `SCREENSHOT`, `VIDEO`, `USER_ATTESTATION`, `USER_ESTIMATE`, and `INFERENCE`.

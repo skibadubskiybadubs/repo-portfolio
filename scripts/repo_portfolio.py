@@ -50,6 +50,10 @@ SOURCE_TYPES = {
     "DOCUMENTATION", "SCREENSHOT", "VIDEO", "USER_ATTESTATION", "USER_ESTIMATE", "INFERENCE",
 }
 ARTIFACT_SOURCES = SOURCE_TYPES - {"USER_ATTESTATION", "USER_ESTIMATE"}
+REFERENCE_REQUIRED_SOURCE_TYPES = {
+    "SOURCE_CODE", "TEST", "CONFIG", "BUILD_OR_PACKAGE_METADATA", "GIT_HISTORY",
+    "DOCUMENTATION", "SCREENSHOT", "VIDEO",
+}
 CURRENCIES = {"ACTIVE", "STALE", "REVIEW_REQUIRED"}
 CORE_KEYS = [
     "project", "problem", "users", "workflows", "technology", "architecture",
@@ -413,12 +417,24 @@ def ensure_snapshot(project: Path, out: Path) -> tuple[bool, str | None]:
 
 
 def normalize_claim(item: dict[str, Any], kind: str, snapshot_id: str) -> dict[str, Any]:
-    status = str(item.get("status", "USER_CONFIRMED" if kind == "interview" else "CONFIRMED")).upper()
+    if kind in {"observed", "canonical"}:
+        raw_status = item.get("status")
+        if not isinstance(raw_status, str) or not raw_status.strip():
+            layer = "Observed" if kind == "observed" else "Canonical"
+            raise ValueError(f"{layer} claim requires an explicit non-empty status.")
+    else:
+        raw_status = item.get("status", "USER_CONFIRMED")
+    status = str(raw_status).upper()
     sources = list(item.get("sources", []))
     if kind == "interview" and not sources:
         source_type = "USER_ESTIMATE" if status == "USER_ESTIMATE" else "USER_ATTESTATION"
         question_id = item.get("interview_question_id")
         sources = [{"type": source_type, "reference": question_id or "interview", "interview_question_id": question_id}]
+    for source in sources:
+        if source.get("type") in REFERENCE_REQUIRED_SOURCE_TYPES:
+            reference = source.get("reference")
+            if not isinstance(reference, str) or not reference.strip():
+                raise ValueError(f"Artifact source {source.get('type')} requires a non-empty reference.")
     return {
         "id": str(item.get("id", "")).strip(), "category": str(item.get("category", "project")).lower().strip(),
         "claim": str(item.get("claim", "")).strip(), "status": status, "sources": sources,
@@ -1056,7 +1072,13 @@ def claim_errors(item: dict[str, Any], id_set: set[str], prefix: str) -> list[st
     claim_id = item.get("id", "<missing>")
     if not re.fullmatch(r"[A-Z]+-\d{3,}", str(claim_id)):
         errors.append(f"{prefix} invalid evidence ID: {claim_id}")
-    if item.get("status") not in STATUSES:
+    explicit_status_missing = (
+        prefix in {"observed", "canonical"}
+        and (not isinstance(item.get("status"), str) or not item.get("status", "").strip())
+    )
+    if explicit_status_missing:
+        errors.append(f"{claim_id} {prefix} claim is missing an explicit status")
+    elif item.get("status") not in STATUSES:
         errors.append(f"{claim_id} uses invalid status {item.get('status')}")
     if item.get("currency", "ACTIVE") not in CURRENCIES:
         errors.append(f"{claim_id} uses invalid currency {item.get('currency')}")
@@ -1064,14 +1086,19 @@ def claim_errors(item: dict[str, Any], id_set: set[str], prefix: str) -> list[st
     if item.get("status") not in {"UNKNOWN", "USER_CONFIRMATION_REQUIRED"} and not sources:
         errors.append(f"{claim_id} has no provenance")
     for source in sources:
-        if source.get("type") not in SOURCE_TYPES:
-            errors.append(f"{claim_id} uses invalid source type {source.get('type')}")
-        if source.get("type") == "VIDEO" and source.get("timestamp_seconds") is None:
+        source_type = source.get("type")
+        if source_type not in SOURCE_TYPES:
+            errors.append(f"{claim_id} uses invalid source type {source_type}")
+        if source_type in REFERENCE_REQUIRED_SOURCE_TYPES:
+            reference_value = source.get("reference")
+            if not isinstance(reference_value, str) or not reference_value.strip():
+                errors.append(f"{claim_id} artifact source {source_type} requires a non-empty reference")
+        if source_type == "VIDEO" and source.get("timestamp_seconds") is None:
             errors.append(f"{claim_id} describes video behavior without a timestamp")
-        if source.get("type") in {"VIDEO", "SCREENSHOT"} and source.get("cached_path") and source.get("reference") == source.get("cached_path"):
+        if source_type in {"VIDEO", "SCREENSHOT"} and source.get("cached_path") and source.get("reference") == source.get("cached_path"):
             errors.append(f"{claim_id} uses a cached path as media provenance")
         reference = str(source.get("reference", ""))
-        if source.get("type") in {"VIDEO", "SCREENSHOT"} and re.search(r"(^|/)\.repo-portfolio/media/cache/|^media/cache/", reference):
+        if source_type in {"VIDEO", "SCREENSHOT"} and re.search(r"(^|/)\.repo-portfolio/media/cache/|^media/cache/", reference):
             errors.append(f"{claim_id} uses a cached path as media provenance")
         if is_sensitive(reference) and (not item.get("sensitive") or item.get("public_safe")):
             errors.append(f"{claim_id} references a sensitive path without sensitive handling")

@@ -13,6 +13,7 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "repo_portfolio.py"
+README = Path(__file__).parents[1] / "README.md"
 PYTHON = os.environ.get("REPO_PORTFOLIO_PYTHON", shutil.which("python3.12") or shutil.which("python3") or "python3")
 CORE_KEYS = [
     "project", "problem", "users", "workflows", "technology", "architecture",
@@ -163,6 +164,92 @@ class RepoPortfolioBehaviorTests(unittest.TestCase):
         self.assertFalse(report["artifact_analysis_finished"])
         self.assertFalse(report["workflow_complete"])
         self.assertTrue(any("PENDING" in error for error in report["errors"]))
+
+    def test_observed_claim_without_status_is_rejected_without_persistence(self) -> None:
+        self.write("src/main.py", "print('hello')")
+        self.analyze("--static")
+        result = self.run_tool(
+            "ingest", str(self.root), "--kind", "observed", "--input",
+            str(self.payload("missing-observed-status.json", [{
+                "category": "architecture", "claim": "The main module is an entry point.",
+                "sources": [{"type": "SOURCE_CODE", "reference": "src/main.py:1"}],
+            }])), check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Observed claim requires an explicit non-empty status", result.stderr)
+        self.assertEqual(self.read("observed_evidence.json")["claims"], [])
+
+    def test_canonical_claim_without_status_is_rejected_without_persistence(self) -> None:
+        self.write("src/main.py", "print('hello')")
+        self.analyze("--static")
+        self.set_plan([{
+            "id": "D-ARCH", "priority": "high", "reason": "Source code exists.", "focus": ["entry point"],
+        }])
+        self.finish_domain("D-ARCH")
+        result = self.command_result("set-reconciled", {"claims": [{
+            "category": "architecture", "claim": "The main module is an entry point.",
+            "sources": [{"type": "SOURCE_CODE", "reference": "src/main.py:1"}],
+        }]})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Canonical claim requires an explicit non-empty status", result.stderr)
+        self.assertEqual(self.read("evidence.json")["claims"], [])
+        self.assertFalse(self.read("session.json")["reconciliation_ready"])
+
+    def test_explicit_confirmed_claim_still_completes_normally(self) -> None:
+        self.complete_static_workflow()
+        claim = self.read("evidence.json")["claims"][0]
+        self.assertEqual(claim["status"], "CONFIRMED")
+        self.assertTrue(json.loads(self.run_tool("validate", str(self.root)).stdout)["valid"])
+
+    def test_interview_claim_default_retains_question_provenance(self) -> None:
+        self.write("src/main.py", "print('hello')")
+        self.analyze()
+        result = self.run_tool(
+            "ingest", str(self.root), "--kind", "interview", "--input",
+            str(self.payload("interview-default.json", [{
+                "category": "impact", "claim": "The developer reports that the tool reduced rework.",
+                "interview_question_id": "Q-IMPACT-001",
+            }])),
+        )
+        self.assertEqual(result.returncode, 0)
+        claim = self.read("interview_evidence.json")["claims"][0]
+        self.assertEqual(claim["status"], "USER_CONFIRMED")
+        self.assertEqual(claim["sources"], [{
+            "type": "USER_ATTESTATION", "reference": "Q-IMPACT-001",
+            "interview_question_id": "Q-IMPACT-001",
+        }])
+
+    def test_artifact_source_without_reference_is_rejected(self) -> None:
+        self.write("src/main.py", "print('hello')")
+        self.analyze("--static")
+        for index, source in enumerate(({"type": "SOURCE_CODE"}, {"type": "DOCUMENTATION", "reference": "   "})):
+            result = self.run_tool(
+                "ingest", str(self.root), "--kind", "observed", "--input",
+                str(self.payload(f"missing-reference-{index}.json", [{
+                    "category": "architecture", "claim": "An artifact-backed claim.",
+                    "status": "CONFIRMED", "sources": [source],
+                }])), check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires a non-empty reference", result.stderr)
+        self.assertEqual(self.read("observed_evidence.json")["claims"], [])
+
+    def test_valid_artifact_reference_is_accepted(self) -> None:
+        self.write("src/main.py", "print('hello')")
+        self.analyze("--static")
+        claim = self.ingest_claim()
+        self.assertEqual(claim["sources"][0]["reference"], "src/main.py:1")
+
+    def test_validator_rejects_persisted_missing_status_and_reference(self) -> None:
+        self.complete_static_workflow()
+        observed = self.read("observed_evidence.json")
+        observed["claims"][0].pop("status")
+        observed["claims"][0]["sources"][0].pop("reference")
+        (self.out / "observed_evidence.json").write_text(json.dumps(observed), encoding="utf-8")
+        result = self.run_tool("validate", str(self.root), check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("observed claim is missing an explicit status", result.stdout)
+        self.assertIn("artifact source SOURCE_CODE requires a non-empty reference", result.stdout)
 
     def test_partial_and_blocked_are_honest_terminal_states(self) -> None:
         self.write("src/main.py", "print('historical')")
@@ -607,6 +694,12 @@ class RepoPortfolioBehaviorTests(unittest.TestCase):
         report = json.loads(self.run_tool("doctor").stdout)
         self.assertEqual(report["minimum_python"], "3.9")
         self.assertTrue(report["python_supported"])
+
+    def test_readme_is_concise_and_usage_first(self) -> None:
+        text = README.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# repo-portfolio\n\n## HOW TO USE IT"))
+        self.assertLess(text.index("## HOW TO USE IT"), text.index("## What it is"))
+        self.assertLessEqual(len(text.splitlines()), 30)
 
 
 if __name__ == "__main__":
