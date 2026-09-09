@@ -1,72 +1,78 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Repo-Portfolio evidence contract vocabulary",
-  "schema_version": "1.0",
+  "schema_version": "1.1",
+  "supported_python": ">=3.9",
+  "responsibility_boundary": {
+    "helper": [
+      "state", "schemas", "ids", "provenance", "coverage", "gap_scores",
+      "persistence", "repository_fingerprints", "validation", "media_preprocessing"
+    ],
+    "codex": [
+      "semantic_investigation", "dynamic_analysis_planning", "interpretation",
+      "gap_selection", "artifact_interview_routing", "question_generation",
+      "answer_interpretation", "reconciliation", "dossier_synthesis"
+    ]
+  },
   "claim": {
     "required": [
-      "id",
-      "category",
-      "claim",
-      "status",
-      "sources",
-      "career_signals",
-      "public_safe",
-      "sensitive",
-      "supports",
-      "contradicts"
+      "id", "category", "claim", "status", "sources", "career_signals",
+      "public_safe", "sensitive", "supports", "contradicts"
+    ],
+    "optional": [
+      "dimensions", "normalized", "snapshot_id", "currency",
+      "derived_from_claim_ids", "notes", "origin"
     ],
     "id_pattern": "^[A-Z]+-[0-9]{3,}$",
     "statuses": [
-      "CONFIRMED",
-      "USER_CONFIRMED",
-      "USER_ESTIMATE",
-      "STRONG_INFERENCE",
-      "WEAK_INFERENCE",
-      "USER_CONFIRMATION_REQUIRED",
-      "UNKNOWN",
-      "CONTRADICTED"
+      "CONFIRMED", "USER_CONFIRMED", "USER_ESTIMATE", "STRONG_INFERENCE",
+      "WEAK_INFERENCE", "USER_CONFIRMATION_REQUIRED", "UNKNOWN", "CONTRADICTED"
     ],
+    "currencies": ["ACTIVE", "STALE", "REVIEW_REQUIRED"],
     "source_types": [
-      "SOURCE_CODE",
-      "TEST",
-      "CONFIG",
-      "BUILD_OR_PACKAGE_METADATA",
-      "GIT_HISTORY",
-      "DOCUMENTATION",
-      "SCREENSHOT",
-      "VIDEO",
-      "USER_ATTESTATION",
-      "USER_ESTIMATE",
-      "INFERENCE"
+      "SOURCE_CODE", "TEST", "CONFIG", "BUILD_OR_PACKAGE_METADATA",
+      "GIT_HISTORY", "DOCUMENTATION", "SCREENSHOT", "VIDEO",
+      "USER_ATTESTATION", "USER_ESTIMATE", "INFERENCE"
     ]
   },
+  "analysis_coverage": {
+    "states": ["PENDING", "COMPLETE", "PARTIAL", "NOT_APPLICABLE", "BLOCKED"],
+    "terminal_states": ["COMPLETE", "PARTIAL", "NOT_APPLICABLE", "BLOCKED"],
+    "partial_and_blocked_require_reason": true,
+    "not_applicable_requires_reason_and_evidence": true,
+    "only_pending_blocks_artifact_analysis_finished": true
+  },
+  "gap_analysis": {
+    "dimension_fields": [
+      "id", "topic", "relevant", "relevance_reason", "weight",
+      "resolution_channel", "evidence_claim_ids", "completeness_percent"
+    ],
+    "resolution_channels": ["ARTIFACT", "INTERVIEW"],
+    "ordering": "descending gap_score, then id"
+  },
+  "media": {
+    "accepted_inputs": [
+      "local_image", "local_video", "local_directory", "http_image",
+      "https_image", "http_video", "https_video", "youtube_video"
+    ],
+    "remote_canonical_source": "original_url",
+    "video_evidence_requires_timestamp": true,
+    "cache_scope": "analysis_working_directory"
+  },
   "project_required_keys": [
-    "project",
-    "problem",
-    "users",
-    "workflows",
-    "technology",
-    "architecture",
-    "automation",
-    "testing",
-    "delivery",
-    "maintenance",
-    "ownership",
-    "impact",
-    "decisions",
-    "career_signals",
-    "unknowns",
-    "extensions"
+    "project", "problem", "users", "workflows", "technology", "architecture",
+    "automation", "testing", "delivery", "maintenance", "ownership", "impact",
+    "decisions", "career_signals", "unknowns", "extensions"
+  ],
+  "semantic_summary_entry": {
+    "required": ["statement", "status", "dimensions", "evidence_claim_ids"]
+  },
+  "session_completion_fields": [
+    "artifact_analysis_finished", "evidence_completeness", "workflow_complete"
   ],
   "required_outputs": [
-    "dossier.md",
-    "project.json",
-    "observed_evidence.json",
-    "interview_evidence.json",
-    "evidence.json",
-    "open_questions.md",
-    "public_safe_summary.md",
-    "media/media_index.json",
-    "media/extracted_frames/"
+    "dossier.md", "project.json", "observed_evidence.json",
+    "interview_evidence.json", "evidence.json", "open_questions.md",
+    "public_safe_summary.md", "media/media_index.json", "media/extracted_frames/"
   ]
 }

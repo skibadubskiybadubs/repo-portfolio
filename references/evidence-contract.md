@@ -1,71 +1,33 @@
 # Evidence Contract
 
-## Contents
+The machine-readable vocabulary is in [contracts.json](contracts.json).
 
-1. Claim schema
-2. Status and source vocabularies
-3. Reconciliation
-4. Project model
-5. Public safety
+## Claims
 
-## Claim schema
+Every claim retains `id`, `category`, `claim`, approved `status`, `sources`, `career_signals`, notes, public/sensitive flags, and support/contradiction relationships. It may additionally contain:
 
-The machine-readable vocabulary is also available in [contracts.json](contracts.json).
+- `dimensions`: explicit contextual dimensions supported by the claim;
+- `normalized`: structured values stated by evidence;
+- `snapshot_id`: repository/media snapshot supporting technical evidence;
+- `currency`: `ACTIVE`, `STALE`, or `REVIEW_REQUIRED`;
+- `derived_from_claim_ids`: source-layer claims represented by a reconciled claim.
 
-Use this shape for every meaningful claim:
+Use project-relative artifact references. Remote media evidence must use the original URL as `reference`; behavioral video evidence also needs `timestamp_seconds` and may include title.
 
-```json
-{
-  "id": "ARCH-001",
-  "category": "architecture",
-  "claim": "The application registers commands through a central registry.",
-  "status": "CONFIRMED",
-  "sources": [
-    {"type": "SOURCE_CODE", "reference": "src/registry.py:Registry"}
-  ],
-  "career_signals": ["software_architecture", "extensibility"],
-  "notes": null,
-  "public_safe": false,
-  "sensitive": false,
-  "supports": [],
-  "contradicts": []
-}
-```
+Statuses remain `CONFIRMED`, `USER_CONFIRMED`, `USER_ESTIMATE`, `STRONG_INFERENCE`, `WEAK_INFERENCE`, `USER_CONFIRMATION_REQUIRED`, `UNKNOWN`, and `CONTRADICTED`.
 
-Use uppercase, category-prefixed IDs. Use project-relative references. `sources` may contain `commit`, `timestamp`, `symbol`, or `interview_question_id` in addition to `reference`.
-
-## Status and source vocabularies
-
-Statuses are exactly:
-
-- `CONFIRMED`: directly established by inspectable artifacts.
-- `USER_CONFIRMED`: explicitly stated by the user and not independently proven.
-- `USER_ESTIMATE`: an approximation supplied by the user.
-- `STRONG_INFERENCE`: multiple observations strongly support the interpretation.
-- `WEAK_INFERENCE`: plausible but insufficiently supported.
-- `USER_CONFIRMATION_REQUIRED`: important hypothesis awaiting the user.
-- `UNKNOWN`: no useful evidence.
-- `CONTRADICTED`: material sources conflict.
-
-Source types are exactly `SOURCE_CODE`, `TEST`, `CONFIG`, `BUILD_OR_PACKAGE_METADATA`, `GIT_HISTORY`, `DOCUMENTATION`, `SCREENSHOT`, `VIDEO`, `USER_ATTESTATION`, `USER_ESTIMATE`, and `INFERENCE`.
-
-Artifact claims cannot use user sources. Interview claims must use `USER_ATTESTATION` or `USER_ESTIMATE`. Runtime results require evidence from an explicitly authorized verification workflow; static file presence is never enough.
+Source types remain `SOURCE_CODE`, `TEST`, `CONFIG`, `BUILD_OR_PACKAGE_METADATA`, `GIT_HISTORY`, `DOCUMENTATION`, `SCREENSHOT`, `VIDEO`, `USER_ATTESTATION`, `USER_ESTIMATE`, and `INFERENCE`.
 
 ## Reconciliation
 
-- Retain observed and interview stores unchanged as provenance layers.
-- Merge claims sharing an ID or connected through `supports` when their meanings agree.
-- Preserve all sources and the strongest defensible status; artifact confirmation remains `CONFIRMED`.
-- Mark a target claim `CONTRADICTED` when an interview claim lists it in `contradicts`; preserve both claims and explain the conflict in notes.
-- Never turn a user estimate into a confirmed fact.
-- Never treat Git authorship, repository possession, or a project-wide feature as proof of personal ownership.
+Codex authors canonical reconciliation. Retain all material sources and link every canonical claim to represented observed/interview claim IDs. Never promote an estimate, discard a contradiction, infer personal ownership from Git, or claim runtime success from static evidence. The helper validates these invariants but does not choose semantic winners.
 
 ## Project model
 
-`project.json` always contains these core keys: `project`, `problem`, `users`, `workflows`, `technology`, `architecture`, `automation`, `testing`, `delivery`, `maintenance`, `ownership`, `impact`, `decisions`, `career_signals`, `unknowns`, and `extensions`.
+Preserve the universal core: `project`, `problem`, `users`, `workflows`, `technology`, `architecture`, `automation`, `testing`, `delivery`, `maintenance`, `ownership`, `impact`, `decisions`, `career_signals`, `unknowns`, and `extensions`.
 
-Extensions are optional maps selected from evidence. Keep web, CAD/BIM, desktop, data/research, plugin, library, CLI, service, or unknown-ecosystem details out of the core when they are not generally comparable.
+Add `semantic_summary` entries shaped as `{statement, status, dimensions, evidence_claim_ids}`. Use only active canonical evidence. Optional normalized fields must be directly supplied by linked evidence. Keep ecosystem-specific richness in `extensions`.
 
 ## Public safety
 
-Default `public_safe` to false for semantic or user-supplied claims. Mark it true only after checking for secrets, private customer/project identities, confidential data, proprietary excerpts, sensitive internal paths, and weak or contested assertions. The generator additionally requires `sensitive: false` and status `CONFIRMED` or `USER_CONFIRMED`.
+Public output may use only explicitly public-safe, non-sensitive `CONFIRMED` or `USER_CONFIRMED` claims. Exclude estimates, inference, contradictions, secrets, private identities, confidential data, proprietary excerpts, and sensitive paths.

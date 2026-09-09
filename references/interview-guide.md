@@ -1,43 +1,29 @@
 # Adaptive Interview Guide
 
-## Contents
+## Build gaps from this project
 
-1. Priority
-2. Question construction
-3. Branching
-4. Answer normalization
-5. Stop conditions
+Do not instantiate a stock questionnaire. Examine active observed claims, coverage findings, profile signals, contradictions, and contextual subdimensions. Select only gaps with meaningful downstream evidence value.
 
-## Priority
+For every gap, decide whether more repository/media inspection can answer it. Route discoverable facts to `ARTIFACT`; route motivation, actual users, ownership, impact, adoption, rationale, constraints, and operational history to `INTERVIEW` when artifacts cannot establish them.
 
-Prefer gaps in this order, adjusted by the discovered project:
+Useful fallback topics include ownership boundaries, original problem, previous workflow, actual users and frequency, outcomes and measurement basis, technical rationale/constraints, and operational lifespan. Use these only when relevant to observed project evidence.
 
-1. Personal ownership and team boundaries.
-2. Original problem and previous workflow.
-3. Actual users, stakeholders, and frequency.
-4. Impact, adoption, and outcomes.
-5. Undocumented decisions and external constraints.
-6. Maintenance, support, replacement, or abandonment.
+## Score and ask
 
-Do not ask a contextual question merely because its section is empty. Ask only if the answer could materially improve future evidence use.
+Supply importance and current completeness to the helper. It calculates the persisted gap score, including contradiction and valuable-inference boosts. Write each interview question yourself and connect it to one scored interview gap plus actual claim, profile, or coverage references.
 
-## Question construction
+Ask exactly one question returned by `next-question`. State why the evidence leaves it unresolved. Include a tentative interpretation only when specific observations support it, and invite correction.
 
-Ask one question. State the observations that motivated it. If evidence supports a hypothesis, offer it as tentative—not as fact—and make correction easy. Do not bundle users, impact, ownership, and rationale into one prompt.
+## Branch and normalize
 
-## Branching
+Interpret each answer before choosing the next gap:
 
-- A previous manual workflow opens branches for performer, frequency, painful steps, errors, and defensible before/after estimates.
-- A newly enabled capability opens branches for why it was previously impossible and who benefited.
-- Real users open branches for roles, adoption, frequency, support, and lifespan.
-- A team project opens subsystem-specific ownership branches.
-- A workaround opens branches for constraints, alternatives, and deliberate tradeoffs.
-- A contradiction opens an immediate clarification branch before unrelated questions.
+- A manual workflow may open performer, frequency, pain/error, and before/after dimensions.
+- Actual users may open role, internal/external, adoption, support, and lifespan dimensions.
+- Team context may open architecture, implementation, UI, deployment, and maintenance ownership.
+- A workaround may open constraint, alternative, and tradeoff dimensions.
+- A contradiction requires clarification or explicit preservation.
 
-## Answer normalization
+Record the exact answer. Normalize only stated facts. Separate distinct claims. Mark approximations as `USER_ESTIMATE`. If the user does not remember, resolve the question without manufacturing a claim.
 
-Record the exact answer in the question record. Create short normalized claims containing only stated facts. Separate distinct claims. Mark approximate quantities as estimates. Use `supports` and `contradicts` to connect user testimony to observed claims. If the user does not remember, resolve the question without inventing a claim and retain the gap as unknown.
-
-## Stop conditions
-
-Stop when no unresolved contradiction or high-value gap remains, the user asks to stop, or further questioning would produce only optional detail. Preserve medium and low-value questions in `open_questions.md`.
+Stop when Codex determines no remaining interview gap has sufficient value, the user stops, or only optional unknowns remain. Preserve unresolved gaps in `open_questions.md`.

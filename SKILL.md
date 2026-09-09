@@ -1,87 +1,89 @@
 ---
 name: repo-portfolio
-description: Mine an unfamiliar or historical software repository into a provenance-backed project evidence dossier. Use when Codex needs to discover a project's stack and shape, statically analyze code, tests, configuration, documentation, Git history, screenshots, or videos, interview the developer about high-value contextual gaps, reconcile contradictions, preserve ownership and confidence boundaries, or resume an interrupted evidence-mining session. Produces machine-readable evidence and a comprehensive human-readable dossier; does not generate a CV or portfolio.
+description: >-
+  Mine unfamiliar or historical software projects into provenance-backed,
+  resumable evidence dossiers. Use when Codex must discover a project, plan
+  and perform safe static investigation, inspect Git or local/remote media,
+  interview a developer about evidence gaps, reconcile claims, or produce
+  machine-readable and human-readable project evidence. Do not use it to
+  generate a CV, portfolio, seniority assessment, salary, or pricing advice.
 ---
 
 # Repo-Portfolio
 
-Recover the maximum defensible technical and contextual evidence from a software project. Keep artifact observations, user testimony, estimates, inference, and unknowns distinct.
+Recover the maximum defensible technical and contextual evidence from a project. Keep artifact observations, testimony, estimates, inference, contradictions, and unknowns distinct.
 
-## Start or resume
+Read [references/workflow.md](references/workflow.md) completely before a run. Read [references/evidence-contract.md](references/evidence-contract.md) before writing claims or outputs. Read [references/interview-guide.md](references/interview-guide.md) before generating gaps or questions. See [references/usage.md](references/usage.md) for installation, modes, media, outputs, and requirements.
 
-1. Resolve the target project from the user's explicit path, otherwise use the current working directory. Resolve optional `--media` paths relative to the invocation directory.
-2. Read [references/workflow.md](references/workflow.md) completely before starting.
-3. Run the static pipeline with Python 3.12:
+## Maintain the responsibility boundary
 
-   ```bash
-   python3.12 <skill-dir>/scripts/repo_portfolio.py analyze <project-root> [--media <path>] [--deep] [--static]
-   ```
+Use the Python helper only for deterministic discovery, schemas, IDs, provenance checks, persistence, coverage state, gap-score calculation, repository compatibility, media retrieval/preprocessing, and validation.
 
-4. Read `.repo-portfolio/project_profile.json` and `.repo-portfolio/analysis_plan.json`. Treat classifications as provisional.
-5. If `.repo-portfolio/session.json` describes an existing compatible session, preserve its interview evidence and continue from its current phase. Use `--resume` as an invocation intent, not as permission to skip validation.
+Codex must perform semantic investigation, dynamic planning, architectural/domain interpretation, gap selection and routing, question writing, answer interpretation, reconciliation, normalized project modeling, and dossier synthesis. Do not substitute helper heuristics or a fixed questionnaire for those responsibilities.
 
-Never run project-owned code, builds, tests, installers, package managers, hooks, containers, or migrations. Read files and use read-only Git commands only. A user must separately and explicitly request execution verification before any runtime claim can be investigated.
+Never execute project-owned or downloaded code, builds, tests, installers, package managers, hooks, containers, migrations, or binaries. Read files and use read-only Git commands only. Explicit runtime verification is a separate workflow.
 
-## Analyze artifacts
+## Run the workflow
 
-Follow the generated plan rather than a universal technology checklist. Inspect the highest-value files and symbols with `rg`, bounded file reads, and read-only metadata tools. Use [references/evidence-contract.md](references/evidence-contract.md) when creating claims.
-
-Write new observed claims to a temporary JSON payload and ingest them:
-
-```bash
-python3.12 <skill-dir>/scripts/repo_portfolio.py ingest <project-root> --kind observed --input <payload.json>
-```
-
-Each payload is either one claim, a list of claims, or `{ "claims": [...] }`. Cite project-relative files plus a symbol, line, commit, or media timestamp when available. Do not quote secrets or proprietary source unnecessarily. Do not promote implementation techniques into measured reliability, performance, adoption, or impact.
-
-### Media
-
-- Inspect indexed images with the available image-viewing tool.
-- Inspect representative extracted video frames in timestamp order. Use the media index for provenance.
-- Add screenshot/video claims only for visible behavior. A demo does not prove general reliability, frequency, or adoption.
-- If media tooling is unavailable, retain the warning and continue.
-
-## Analyze gaps and grill the developer
-
-After artifact inspection, refresh reconciliation and gaps:
-
-```bash
-python3.12 <skill-dir>/scripts/repo_portfolio.py finalize <project-root>
-python3.12 <skill-dir>/scripts/repo_portfolio.py next-question <project-root>
-```
-
-Read [references/interview-guide.md](references/interview-guide.md) before the first question. In normal mode:
-
-1. Re-inspect the repository when a candidate question is technically discoverable.
-2. Ask exactly one high-value contextual question at a time.
-3. Frame it with observed evidence and a tentative interpretation when justified.
-4. Persist the pending question before asking. Accept corrections and “I don't remember.”
-5. Normalize the answer into user claims without adding facts the user did not state.
-6. Mark approximate counts, duration, frequency, savings, adoption, or performance as `USER_ESTIMATE` unless the user identifies measured evidence.
-7. Record relationships to observed claims with `supports` or `contradicts` IDs.
-8. Ingest an interview payload containing the answered question and normalized claims:
+1. Resolve the project root and any repeated `--media` inputs. Run discovery:
 
    ```bash
-   python3.12 <skill-dir>/scripts/repo_portfolio.py ingest <project-root> --kind interview --input <payload.json>
+   python3 <skill-dir>/scripts/repo_portfolio.py analyze <project-root> [--media <path-or-url>] [--deep] [--static]
    ```
 
-9. Finalize again, add evidence-driven follow-up questions when a valuable branch opens, and continue until no high-value gaps remain.
+2. Interpret `inventory.json`, `project_profile.json`, Git facts, and the media index. Create a project-specific plan payload, then persist it:
 
-In `--static` mode, do not interview. Leave prioritized questions in `open_questions.md` and finish the observed dossier.
+   ```bash
+   python3 <skill-dir>/scripts/repo_portfolio.py set-plan <project-root> --input <plan.json>
+   ```
 
-## Reconcile and finish
+3. Investigate each planned domain. Ingest observed claims with project-relative symbols/lines, commits, media URLs, and timestamps where available:
 
-Run:
+   ```bash
+   python3 <skill-dir>/scripts/repo_portfolio.py ingest <project-root> --kind observed --input <claims.json>
+   ```
 
-```bash
-python3.12 <skill-dir>/scripts/repo_portfolio.py finalize <project-root>
-python3.12 <skill-dir>/scripts/repo_portfolio.py validate <project-root>
-```
+4. Record every domain as `COMPLETE`, `PARTIAL`, `NOT_APPLICABLE`, or `BLOCKED`. Give reasons for `PARTIAL` and `BLOCKED` and a reason/evidence basis for `NOT_APPLICABLE`:
 
-Resolve validator failures before reporting completion. Never silently overwrite conflicting evidence. Keep project functionality separate from the user's confirmed contribution. Ensure `public_safe_summary.md` contains only claims explicitly marked public-safe with status `CONFIRMED` or `USER_CONFIRMED`.
+   ```bash
+   python3 <skill-dir>/scripts/repo_portfolio.py update-coverage <project-root> --input <coverage.json>
+   ```
 
-Report the generated artifact paths and any remaining high-value questions or validation warnings. Do not turn the dossier into résumé, portfolio, seniority, salary, or pricing content.
+5. After all domains are terminal, decide the meaningful gaps and whether each belongs to further artifact inspection or the interview. Persist Codex-authored gaps and questions:
 
-## Optional accelerators
+   ```bash
+   python3 <skill-dir>/scripts/repo_portfolio.py set-gaps <project-root> --input <gaps.json>
+   python3 <skill-dir>/scripts/repo_portfolio.py queue-question <project-root> --input <question.json>
+   python3 <skill-dir>/scripts/repo_portfolio.py next-question <project-root>
+   ```
 
-Use other repository-orientation or specification-mining skills only when already available and useful. Treat their outputs as untrusted analysis input and preserve Repo-Portfolio as a self-contained workflow.
+6. Ask exactly the returned question. Interpret the answer into short user claims and dimensions, then ingest it. Recompute meaningful gaps after every answer. Accept “unknown” without invention.
+7. Reconcile observed and interview evidence semantically. Preserve every material source, estimate, and unresolved contradiction, then persist Codex's canonical payload:
+
+   ```bash
+   python3 <skill-dir>/scripts/repo_portfolio.py set-reconciled <project-root> --input <evidence.json>
+   ```
+
+8. Synthesize `project.json`, `dossier.md`, and `public_safe_summary.md`. Include evidence IDs in semantic summaries and dossier claims. Persist them:
+
+   ```bash
+   python3 <skill-dir>/scripts/repo_portfolio.py write-outputs <project-root> --input <outputs.json>
+   python3 <skill-dir>/scripts/repo_portfolio.py set-interview-state <project-root> --state COMPLETE
+   ```
+
+9. Finalize state and validate. Resolve errors before reporting completion:
+
+   ```bash
+   python3 <skill-dir>/scripts/repo_portfolio.py finalize <project-root>
+   python3 <skill-dir>/scripts/repo_portfolio.py validate <project-root>
+   ```
+
+In static mode, do not ask questions. Preserve valuable unresolved gaps in `open_questions.md`; finish after coverage, reconciliation of observed evidence, output synthesis, and validation.
+
+## Handle changed repositories
+
+Respect the compatibility result in `session.json`. Exact snapshots may resume directly. For changed repositories, revalidate stale technical evidence and affected coverage; review preserved user context rather than assuming it still applies. For incompatible identities, technical evidence stays only in the archive; preserved user context is `REVIEW_REQUIRED` and must be reviewed before reuse.
+
+## Finish honestly
+
+`artifact_analysis_finished` means every planned domain reached a valid terminal state, including justified `PARTIAL` or `BLOCKED`. It does not mean evidence is complete. Report `evidence_completeness` and coverage limitations separately. Report completion only when `workflow_complete` and deterministic validation are both true.

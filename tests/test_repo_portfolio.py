@@ -1,24 +1,57 @@
 from __future__ import annotations
 
+import functools
+import http.server
 import json
 import os
+import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "repo_portfolio.py"
-PYTHON = os.environ.get("REPO_PORTFOLIO_PYTHON", "python3.12")
+PYTHON = os.environ.get("REPO_PORTFOLIO_PYTHON", shutil.which("python3.12") or shutil.which("python3") or "python3")
+CORE_KEYS = [
+    "project", "problem", "users", "workflows", "technology", "architecture",
+    "automation", "testing", "delivery", "maintenance", "ownership", "impact",
+    "decisions", "career_signals", "unknowns", "extensions",
+]
+
+
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, _format: str, *_args: object) -> None:
+        pass
+
+
+class OversizedImageHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(25 * 1024 * 1024 + 1))
+        self.end_headers()
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        pass
 
 
 class RepoPortfolioBehaviorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.base = Path(self.temp.name)
+        self.root = self.base / "project"
+        self.payloads = self.base / "payloads"
+        self.root.mkdir()
+        self.payloads.mkdir()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    @property
+    def out(self) -> Path:
+        return self.root / ".repo-portfolio"
 
     def write(self, relative: str, content: str = "") -> Path:
         path = self.root / relative
@@ -26,250 +59,554 @@ class RepoPortfolioBehaviorTests(unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         return path
 
-    def run_tool(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def payload(self, name: str, value: object) -> Path:
+        path = self.payloads / name
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    def run_tool(
+        self, *args: str, check: bool = True, env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
-            [PYTHON, str(SCRIPT), *args], capture_output=True, text=True, check=False
+            [PYTHON, str(SCRIPT), *args], capture_output=True, text=True, check=False,
+            env={**os.environ, **(env or {})},
         )
         if check and result.returncode:
             self.fail(f"Command failed ({result.returncode}): {result.stderr}\n{result.stdout}")
         return result
 
-    def analyze(self, *extra: str) -> Path:
-        self.run_tool("analyze", str(self.root), *extra)
-        return self.root / ".repo-portfolio"
+    def command(self, name: str, payload: object) -> subprocess.CompletedProcess[str]:
+        return self.run_tool(name, str(self.root), "--input", str(self.payload(f"{name}.json", payload)))
 
-    def read(self, out: Path, relative: str):
-        return json.loads((out / relative).read_text(encoding="utf-8"))
+    def analyze(self, *extra: str, env: dict[str, str] | None = None) -> None:
+        self.run_tool("analyze", str(self.root), *extra, env=env)
 
-    def init_git(self, authors: list[tuple[str, str]]) -> None:
+    def read(self, relative: str) -> object:
+        return json.loads((self.out / relative).read_text(encoding="utf-8"))
+
+    def set_plan(self, domains: list[dict[str, object]], dimensions: list[dict[str, object]] | None = None) -> None:
+        self.command("set-plan", {
+            "project_profile": {"summary": "Codex interpretation of observed repository signals."},
+            "domains": domains, "dimensions": dimensions or [],
+        })
+
+    def finish_domain(
+        self, domain_id: str, state: str = "COMPLETE", reason: str | None = None,
+        percent: int | None = None, claims: list[str] | None = None,
+    ) -> None:
+        update: dict[str, object] = {
+            "domain_id": domain_id, "state": state,
+            "inspected_references": ["src/main.py"], "evidence_claim_ids": claims or [],
+            "findings_summary": "Codex inspected the planned evidence boundary.",
+        }
+        if reason:
+            update["reason"] = reason
+        if percent is not None:
+            update["completion_percent"] = percent
+        self.command("update-coverage", {"domains": [update]})
+
+    def ingest_claim(self, **overrides: object) -> dict[str, object]:
+        claim: dict[str, object] = {
+            "category": "architecture", "claim": "The main module is the repository entry point.",
+            "status": "CONFIRMED", "sources": [{"type": "SOURCE_CODE", "reference": "src/main.py:1"}],
+            "dimensions": ["architecture.structure"], "public_safe": False,
+        }
+        claim.update(overrides)
+        result = self.run_tool(
+            "ingest", str(self.root), "--kind", "observed", "--input",
+            str(self.payload("ingest.json", [claim])),
+        )
+        claim_id = json.loads(result.stdout)["ids"][0]
+        return next(item for item in self.read("observed_evidence.json")["claims"] if item["id"] == claim_id)
+
+    def complete_static_workflow(self) -> None:
+        self.write("src/main.py", "def main():\n    return 0\n")
+        self.analyze("--static")
+        self.set_plan([{
+            "id": "D-ARCH", "priority": "high", "reason": "The inventory contains an application entry point.",
+            "focus": ["entry point", "module boundary"],
+        }])
+        claim = self.ingest_claim()
+        self.finish_domain("D-ARCH", claims=[claim["id"]])
+        self.command("set-gaps", {
+            "dimensions": [{
+                "id": "architecture.structure", "topic": "architecture", "relevant": True,
+                "relevance_reason": "The repository contains application code.", "weight": 2,
+                "resolution_channel": "ARTIFACT", "evidence_claim_ids": [claim["id"]],
+            }],
+            "gaps": [],
+        })
+        self.command("set-reconciled", {"claims": [claim]})
+        project = {"schema_version": "1.1", **{key: [] for key in CORE_KEYS}}
+        project["project"] = {"name": "Example"}
+        project["semantic_summary"] = {
+            "architecture": [{
+                "statement": claim["claim"], "status": claim["status"],
+                "dimensions": claim["dimensions"], "evidence_claim_ids": [claim["id"]],
+            }]
+        }
+        self.command("write-outputs", {
+            "project": project,
+            "dossier": f"# Project Evidence Dossier\n\n{claim['id']}: {claim['claim']}",
+            "public_safe_summary": "# Public-safe Summary\n\nNo claims were marked for publication.",
+        })
+
+    def test_incomplete_artifact_analysis_cannot_validate_as_complete(self) -> None:
+        self.write("src/main.py", "print('hello')")
+        self.analyze("--static")
+        self.set_plan([{
+            "id": "D-CODE", "priority": "high", "reason": "Source code is present.", "focus": ["entry points"],
+        }])
+        result = self.run_tool("validate", str(self.root), check=False)
+        report = json.loads(result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(report["artifact_analysis_finished"])
+        self.assertFalse(report["workflow_complete"])
+        self.assertTrue(any("PENDING" in error for error in report["errors"]))
+
+    def test_partial_and_blocked_are_honest_terminal_states(self) -> None:
+        self.write("src/main.py", "print('historical')")
+        self.analyze("--static")
+        self.set_plan([
+            {"id": "D-A", "priority": "high", "reason": "Code exists.", "focus": ["logic"]},
+            {"id": "D-B", "priority": "medium", "reason": "History is incomplete.", "focus": ["evolution"]},
+            {"id": "D-C", "priority": "low", "reason": "Deployment may be external.", "focus": ["delivery"]},
+        ])
+        updates = {"domains": [
+            {"domain_id": "D-A", "state": "COMPLETE", "inspected_references": ["src/main.py"]},
+            {"domain_id": "D-B", "state": "PARTIAL", "reason": "Only the final snapshot survives.",
+             "completion_percent": 50, "inspected_references": ["src/main.py"]},
+            {"domain_id": "D-C", "state": "BLOCKED", "reason": "The historical release system is unavailable.",
+             "inspected_references": []},
+        ]}
+        self.command("update-coverage", updates)
+        status = json.loads(self.run_tool("finalize", str(self.root)).stdout)
+        self.assertTrue(status["artifact_analysis_finished"])
+        self.assertAlmostEqual(status["evidence_completeness"], 66.7)
+        self.assertFalse(status["workflow_complete"])
+
+    def test_not_applicable_requires_evidence_and_is_terminal(self) -> None:
+        self.write("src/main.py", "print('cli')")
+        self.analyze("--static")
+        self.set_plan([{
+            "id": "D-UI", "priority": "medium", "reason": "Confirm whether the CLI has a graphical UI.", "focus": ["UI boundary"],
+        }])
+        bad = self.command_result("update-coverage", {
+            "domains": [{"domain_id": "D-UI", "state": "NOT_APPLICABLE", "reason": "No UI."}],
+        })
+        self.assertNotEqual(bad.returncode, 0)
+        self.command("update-coverage", {"domains": [{
+            "domain_id": "D-UI", "state": "NOT_APPLICABLE", "reason": "The only entry point is a CLI.",
+            "inspected_references": ["src/main.py"],
+        }]})
+        self.assertTrue(self.read("session.json")["artifact_analysis_finished"])
+
+    def command_result(self, name: str, payload: object) -> subprocess.CompletedProcess[str]:
+        return self.run_tool(
+            name, str(self.root), "--input", str(self.payload(f"bad-{name}.json", payload)), check=False,
+        )
+
+    def test_different_project_types_accept_different_codex_plans(self) -> None:
+        self.write("package.json", '{"dependencies":{"react":"1"}}')
+        self.write("src/App.tsx", "export const App = () => null")
+        self.analyze("--static")
+        self.set_plan([
+            {"id": "D-WEB", "priority": "high", "reason": "React appears in package metadata.", "focus": ["UI states"]},
+            {"id": "D-DELIVERY", "priority": "medium", "reason": "Delivery context is not yet known.", "focus": ["deployment"]},
+        ])
+        web_ids = {item["id"] for item in self.read("analysis_plan.json")["domains"]}
+
+        other = self.base / "cli"
+        other.mkdir()
+        (other / "main.go").write_text("package main", encoding="utf-8")
+        self.run_tool("analyze", str(other), "--static")
+        plan_path = self.payload("cli-plan.json", {"domains": [{
+            "id": "D-CLI", "priority": "high", "reason": "A Go command entry point is present.", "focus": ["commands", "flags"],
+        }]})
+        self.run_tool("set-plan", str(other), "--input", str(plan_path))
+        cli_ids = {item["id"] for item in json.loads((other / ".repo-portfolio/analysis_plan.json").read_text())["domains"]}
+        self.assertEqual(web_ids, {"D-WEB", "D-DELIVERY"})
+        self.assertEqual(cli_ids, {"D-CLI"})
+
+    def test_discovery_does_not_generate_a_default_questionnaire(self) -> None:
+        self.write("src/main.py", "print('hello')")
+        self.analyze()
+        interview = self.read("interview_evidence.json")
+        self.assertEqual(interview["questions"], [])
+        self.assertEqual(self.read("analysis_plan.json")["domains"], [])
+
+    def test_question_is_grounded_in_actual_project_evidence(self) -> None:
+        self.write("src/transform.py", "def transform(records): return records")
+        self.analyze()
+        self.set_plan([{
+            "id": "D-FLOW", "priority": "high", "reason": "A record transform is implemented.", "focus": ["workflow boundary"],
+        }])
+        claim = self.ingest_claim(
+            category="workflow", claim="The transform function accepts a collection of records.",
+            sources=[{"type": "SOURCE_CODE", "reference": "src/transform.py:1"}],
+            dimensions=["workflows.prior_manual_steps"], status="STRONG_INFERENCE",
+        )
+        self.finish_domain("D-FLOW", claims=[claim["id"]])
+        self.command("set-gaps", {
+            "dimensions": [{
+                "id": "workflows.prior_manual_steps", "topic": "workflows", "relevant": True, "weight": 3,
+                "relevance_reason": "The transform implies an input workflow but artifacts cannot establish prior practice.",
+                "resolution_channel": "INTERVIEW", "evidence_claim_ids": [claim["id"]],
+            }],
+            "gaps": [{
+                "id": "GAP-FLOW", "topic": "workflows", "dimension_id": "workflows.prior_manual_steps",
+                "importance": 90, "confirm_inference": True, "basis_claim_ids": [claim["id"]],
+                "rationale": "Confirm the pre-tool workflow rather than guessing from code.",
+            }],
+        })
+        self.command("queue-question", {
+            "gap_id": "GAP-FLOW",
+            "question": "The repository suggests transform(records) replaced or supported a record-processing step. What did people do before it?",
+            "tentative_interpretation": "The collection-oriented transform may have consolidated a manual record workflow.",
+            "rationale": "Only the developer can establish the historical workflow.",
+        })
+        question = json.loads(self.run_tool("next-question", str(self.root)).stdout)["question"]
+        self.assertIn("transform(records)", question["question"])
+        self.assertEqual(question["basis_claim_ids"], [claim["id"]])
+        self.assertIn("manual record workflow", question["tentative_interpretation"])
+
+    def test_one_confirmed_claim_does_not_complete_a_broad_topic(self) -> None:
+        self.write("src/main.py", "print('hello')")
+        self.analyze("--static")
+        self.set_plan([{"id": "D-USERS", "priority": "high", "reason": "Usage context is unknown.", "focus": ["users"]}])
+        claim = self.ingest_claim(
+            category="users", claim="Documentation names analysts as users.",
+            sources=[{"type": "DOCUMENTATION", "reference": "README.md:Users"}], dimensions=["users.roles"],
+        )
+        self.finish_domain("D-USERS", claims=[claim["id"]])
+        self.command("set-gaps", {"dimensions": [
+            {"id": "users.roles", "topic": "users", "relevant": True, "weight": 1,
+             "relevance_reason": "A role is documented.", "resolution_channel": "ARTIFACT", "evidence_claim_ids": [claim["id"]]},
+            {"id": "users.actual_usage", "topic": "users", "relevant": True, "weight": 1,
+             "relevance_reason": "Actual use matters for this tool.", "resolution_channel": "INTERVIEW", "evidence_claim_ids": []},
+        ], "gaps": [{
+            "id": "GAP-USAGE", "topic": "users", "dimension_id": "users.actual_usage", "importance": 80,
+            "basis_claim_ids": [claim["id"]], "rationale": "A named role does not establish real adoption.",
+        }]})
+        topics = {item["topic"]: item for item in self.read("gap_analysis.json")["topics"]}
+        self.assertEqual(topics["users"]["completeness_percent"], 50.0)
+
+    def test_question_order_uses_gap_score_before_question_id(self) -> None:
+        self.write("src/main.py", "print('hello')")
+        self.analyze()
+        self.set_plan([{"id": "D-CONTEXT", "priority": "high", "reason": "Context is absent.", "focus": ["impact", "ownership"]}])
+        self.finish_domain("D-CONTEXT")
+        dimensions = [
+            {"id": "impact.outcome", "topic": "impact", "relevant": True, "weight": 1,
+             "relevance_reason": "Outcome matters.", "resolution_channel": "INTERVIEW", "evidence_claim_ids": []},
+            {"id": "ownership.scope", "topic": "ownership", "relevant": True, "weight": 1,
+             "relevance_reason": "Scope matters.", "resolution_channel": "INTERVIEW", "evidence_claim_ids": []},
+        ]
+        self.command("set-gaps", {"dimensions": dimensions, "gaps": [
+            {"id": "GAP-LOW", "topic": "ownership", "dimension_id": "ownership.scope", "importance": 20,
+             "basis_references": ["project_profile.json"], "rationale": "Ownership scope is optional context."},
+            {"id": "GAP-HIGH", "topic": "impact", "dimension_id": "impact.outcome", "importance": 95,
+             "basis_references": ["project_profile.json"], "rationale": "The outcome is a high-value unknown."},
+        ]})
+        self.command("queue-question", {"id": "Q-001", "gap_id": "GAP-LOW", "question": "What was your scope?", "rationale": "Resolve scope."})
+        self.command("queue-question", {"id": "Q-999", "gap_id": "GAP-HIGH", "question": "What outcome did it create?", "rationale": "Resolve outcome."})
+        selected = json.loads(self.run_tool("next-question", str(self.root)).stdout)["question"]
+        self.assertEqual(selected["id"], "Q-999")
+        self.assertGreater(selected["gap_score"], 90)
+
+    def test_repository_change_stales_technical_evidence_but_preserves_user_context(self) -> None:
+        self.write("src/main.py", "print('one')")
         subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
-        for index, (name, email) in enumerate(authors):
-            self.write(f"history-{index}.txt", str(index))
-            subprocess.run(["git", "add", f"history-{index}.txt"], cwd=self.root, check=True)
-            env = {
-                **os.environ,
-                "GIT_AUTHOR_NAME": name,
-                "GIT_AUTHOR_EMAIL": email,
-                "GIT_COMMITTER_NAME": name,
-                "GIT_COMMITTER_EMAIL": email,
-            }
-            subprocess.run(["git", "commit", "-q", "-m", f"change {index}"], cwd=self.root, env=env, check=True)
+        subprocess.run(["git", "add", "src/main.py"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "initial"],
+            cwd=self.root, check=True,
+        )
+        self.analyze()
+        self.set_plan([{"id": "D-CODE", "priority": "high", "reason": "Code exists.", "focus": ["behavior"]}])
+        self.ingest_claim()
+        interview_payload = [{
+            "category": "impact", "claim": "The developer reports that the project reduced rework.",
+            "status": "USER_CONFIRMED", "dimensions": ["impact.qualitative_outcome"],
+        }]
+        self.run_tool("ingest", str(self.root), "--kind", "interview", "--input", str(self.payload("user.json", interview_payload)))
+        self.write("src/main.py", "print('two')")
+        self.analyze()
+        self.assertEqual(self.read("session.json")["compatibility"], "CHANGED")
+        self.assertTrue(all(item["currency"] == "STALE" for item in self.read("observed_evidence.json")["claims"]))
+        self.assertTrue(all(item["currency"] == "REVIEW_REQUIRED" for item in self.read("interview_evidence.json")["claims"]))
+        self.assertEqual(self.read("analysis_plan.json")["domains"], [])
 
-    def test_scenario_a_small_python_cli(self) -> None:
-        self.write("pyproject.toml", '[project]\nname = "sample-cli"\n')
-        self.write("src/app.py", "import argparse\nparser = argparse.ArgumentParser()\n")
-        self.write("tests/test_app.py", "def test_cli():\n    assert True\n")
-        self.write("README.md", "# Sample CLI\n")
-        self.init_git([("Developer", "dev@example.test")])
-        out = self.analyze("--static")
-        profile = self.read(out, "project_profile.json")
-        plan = self.read(out, "analysis_plan.json")
-        self.assertIn("Python", profile["ecosystems"])
-        self.assertIn("command_line_tool", profile["project_types"])
-        self.assertIn("web_specific", plan["explicitly_skipped"])
-        self.assertEqual(self.run_tool("validate", str(self.root)).returncode, 0)
-
-    def test_scenario_b_cad_bim_plugin_and_screenshot(self) -> None:
-        self.write("Plugin.csproj", '<Reference Include="RhinoCommon" />')
-        self.write("Components/GeometryComponent.cs", "class GeometryComponent {}")
-        self.write("installer/setup.wxs", "Rhino plugin installer")
-        image = self.root / "screenshots" / "workflow.png"
-        image.parent.mkdir(parents=True)
-        image.write_bytes(b"\x89PNG\r\n\x1a\n")
-        out = self.analyze("--static")
-        profile = self.read(out, "project_profile.json")
-        media = self.read(out, "media/media_index.json")
-        self.assertIn("host_application_plugin", profile["project_types"])
-        self.assertIn("Rhino/Grasshopper", profile["ecosystems"])
-        self.assertEqual(media["items"][0]["source"], "screenshots/workflow.png")
-        self.assertFalse(profile["capabilities"]["database"])
-
-    def test_scenario_c_web_application(self) -> None:
-        self.write("package.json", '{"dependencies":{"react":"1","express":"1","prisma":"1"}}')
-        self.write("src/App.tsx", "export const App = () => <main />")
-        self.write("server/routes.ts", "export const routes = []")
-        self.write(".github/workflows/ci.yml", "jobs: {}")
-        self.write("deploy/Dockerfile", "FROM scratch")
-        out = self.analyze("--static")
-        profile = self.read(out, "project_profile.json")
-        domains = {d["domain"] for d in self.read(out, "analysis_plan.json")["domains"]}
-        self.assertIn("web_application", profile["project_types"])
-        self.assertTrue(profile["capabilities"]["database"])
-        self.assertIn("web", domains)
-        self.assertIn("delivery", domains)
-
-    def test_scenario_d_poorly_documented_repository_keeps_unknowns(self) -> None:
-        self.write("src/process.lua", "function transform(value) return value end")
-        self.init_git([("Old Dev", "old@example.test")])
-        out = self.analyze()
-        self.assertFalse(self.read(out, "project_profile.json")["capabilities"]["documentation"])
-        self.assertTrue(self.read(out, "project.json")["unknowns"])
-        self.assertIn("## High Value", (out / "open_questions.md").read_text())
-
-    def test_scenario_e_external_video_is_indexed_without_false_claims(self) -> None:
-        self.write("main.py", "print('static source only')")
-        external = self.root.parent / f"{self.root.name}-demo.mp4"
-        external.write_bytes(b"not-a-real-video")
-        try:
-            out = self.analyze("--static", "--media", str(external))
-            media = self.read(out, "media/media_index.json")
-            self.assertEqual(len(media["items"]), 1)
-            self.assertTrue(media["items"][0]["source"].startswith("external:"))
-            self.assertTrue(media["warnings"])
-            claims = self.read(out, "evidence.json")["claims"]
-            self.assertFalse(any("reliable" in c["claim"].lower() for c in claims))
-        finally:
-            external.unlink(missing_ok=True)
-
-    def test_scenario_f_contradictory_user_answer_is_preserved(self) -> None:
-        self.write("tests/test_feature.py", "def test_feature(): assert True")
-        out = self.analyze()
-        observed = self.read(out, "observed_evidence.json")["claims"]
-        target = next(c for c in observed if c["category"] == "testing")
-        payload = {
-            "question": {"id": "CTX-001", "answer": "There were no automated tests."},
-            "claims": [{
-                "category": "testing",
-                "claim": "The user remembers that the project had no automated tests.",
-                "status": "USER_CONFIRMED",
-                "interview_question_id": "CTX-001",
-                "contradicts": [target["id"]],
-            }],
-        }
-        payload_path = self.write("answer.json", json.dumps(payload))
-        self.run_tool("ingest", str(self.root), "--kind", "interview", "--input", str(payload_path))
-        evidence = self.read(out, "evidence.json")["claims"]
-        contradicted = next(c for c in evidence if c["id"] == target["id"])
-        self.assertEqual(contradicted["status"], "CONTRADICTED")
-        self.assertTrue(contradicted["contradicts"])
-        self.assertEqual(self.run_tool("validate", str(self.root)).returncode, 0)
-
-    def test_scenario_g_team_repository_does_not_infer_personal_ownership(self) -> None:
-        self.write("main.go", "package main")
-        self.init_git([("One", "one@example.test"), ("Two", "two@example.test")])
-        out = self.analyze("--static")
-        ownership = [c for c in self.read(out, "evidence.json")["claims"] if c["category"] == "ownership"]
-        self.assertTrue(ownership)
-        self.assertTrue(all("does not establish" in c["claim"] for c in ownership))
-
-    def test_scenario_h_unknown_technology_gets_dynamic_brief(self) -> None:
-        self.write("engine/main.zzz", "BEGIN UNKNOWN_ENGINE")
-        out = self.analyze("--static")
-        profile = self.read(out, "project_profile.json")
-        domains = {d["domain"] for d in self.read(out, "analysis_plan.json")["domains"]}
-        self.assertIn("unknown_software_project", profile["project_types"])
-        self.assertIn("unknown_ecosystem_brief", domains)
-        self.assertIn("unknown_ecosystem", self.read(out, "project.json")["extensions"])
-
-    def test_scenario_i_static_mode_never_queues_question(self) -> None:
-        self.write("main.rs", "fn main() {}")
-        out = self.analyze("--static")
-        response = json.loads(self.run_tool("next-question", str(self.root)).stdout)
-        self.assertIsNone(response["question"])
-        self.assertEqual(self.read(out, "session.json")["phase"], "static_complete")
-        self.assertTrue(self.read(out, "project.json")["unknowns"])
-
-    def test_scenario_j_resume_retains_answers_and_pending_question(self) -> None:
-        self.write("main.py", "print('hello')")
-        out = self.analyze()
+    def test_exact_resume_retains_pending_question_and_external_media(self) -> None:
+        self.write("src/main.py", "print('hello')")
+        external_image = self.base / "workflow.png"
+        external_image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        self.analyze("--media", str(external_image))
+        self.set_plan([{"id": "D-CONTEXT", "priority": "high", "reason": "Workflow context is unknown.", "focus": ["usage"]}])
+        self.finish_domain("D-CONTEXT")
+        self.command("set-gaps", {"dimensions": [{
+            "id": "users.actual_usage", "topic": "users", "relevant": True, "weight": 2,
+            "relevance_reason": "The project has an interface but usage is not documented.",
+            "resolution_channel": "INTERVIEW", "evidence_claim_ids": [],
+        }], "gaps": [{
+            "id": "GAP-USAGE", "topic": "users", "dimension_id": "users.actual_usage", "importance": 90,
+            "basis_references": ["media/media_index.json#MEDIA-001"], "rationale": "A screenshot cannot establish actual adoption.",
+        }]})
+        self.command("queue-question", {
+            "gap_id": "GAP-USAGE", "question": "Who actually used the workflow shown in the supplied image?",
+            "rationale": "Only testimony can establish actual use.",
+        })
         first = json.loads(self.run_tool("next-question", str(self.root)).stdout)["question"]
-        payload = {
-            "question": {"id": first["id"], "answer": "Solo project."},
-            "claims": [{
-                "category": "ownership", "claim": "The project was completed solo.",
-                "status": "USER_CONFIRMED", "interview_question_id": first["id"]
-            }],
-        }
-        payload_path = self.write("resume-answer.json", json.dumps(payload))
-        self.run_tool("ingest", str(self.root), "--kind", "interview", "--input", str(payload_path))
-        second = json.loads(self.run_tool("next-question", str(self.root)).stdout)["question"]
-        self.run_tool("analyze", str(self.root))
+        original_media_source = self.read("media/media_index.json")["items"][0]["source"]
+        self.analyze()
         resumed = json.loads(self.run_tool("next-question", str(self.root)).stdout)
+        self.assertEqual(self.read("session.json")["compatibility"], "EXACT")
         self.assertTrue(resumed["resumed"])
-        self.assertEqual(resumed["question"]["id"], second["id"])
-        interview = self.read(out, "interview_evidence.json")
-        self.assertEqual(interview["questions"][0]["status"], "answered")
-        self.assertEqual(len(interview["claims"]), 1)
+        self.assertEqual(resumed["question"]["id"], first["id"])
+        self.assertEqual(self.read("media/media_index.json")["items"][0]["source"], original_media_source)
 
-    def test_sensitive_files_are_not_used_as_baseline_sources(self) -> None:
+    def test_same_size_filesystem_change_is_detected(self) -> None:
+        self.write("main.txt", "aaaa")
+        self.analyze("--static")
+        self.write("main.txt", "bbbb")
+        self.analyze("--static")
+        self.assertEqual(self.read("session.json")["compatibility"], "CHANGED")
+
+    def make_video(self, path: Path) -> None:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg is unavailable")
+        result = subprocess.run([
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+            "testsrc=size=128x72:rate=2", "-t", "4", "-c:v", "mpeg4", str(path),
+        ], capture_output=True, text=True)
+        if result.returncode:
+            self.skipTest(f"ffmpeg cannot create the test video: {result.stderr}")
+
+    def test_video_frames_retain_source_and_timestamps(self) -> None:
+        self.write("src/main.py", "print('media')")
+        video = self.base / "demo.mp4"
+        self.make_video(video)
+        self.analyze("--static", "--media", str(video))
+        item = next(value for value in self.read("media/media_index.json")["items"] if value["type"] == "video")
+        self.assertTrue(item["frames"])
+        self.assertTrue(all(frame["source"] == item["source"] for frame in item["frames"]))
+        self.assertTrue(all(isinstance(frame["timestamp_seconds"], (int, float)) for frame in item["frames"]))
+
+    def test_direct_remote_image_keeps_url_as_canonical_provenance(self) -> None:
+        served = self.base / "served"
+        served.mkdir()
+        (served / "screen.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"safe-test-data")
+        handler = functools.partial(QuietHandler, directory=str(served))
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        except PermissionError:
+            self.skipTest("the test sandbox does not permit loopback sockets")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/screen.png"
+            self.write("src/main.py", "print('media')")
+            self.analyze("--static", "--media", url, env={"REPO_PORTFOLIO_ALLOW_PRIVATE_MEDIA": "1"})
+            item = next(value for value in self.read("media/media_index.json")["items"] if value["type"] == "image")
+            self.assertEqual(item["source"], url)
+            self.assertEqual(item["original_url"], url)
+            self.assertTrue(item["cached_path"].startswith("media/cache/"))
+            self.assertNotEqual(item["source"], item["cached_path"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_remote_html_is_rejected_without_crawling(self) -> None:
+        served = self.base / "served"
+        served.mkdir()
+        (served / "page.html").write_text("<a href='screen.png'>do not follow</a>", encoding="utf-8")
+        (served / "screen.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=str(served)))
+        except PermissionError:
+            self.skipTest("the test sandbox does not permit loopback sockets")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/page.html"
+            self.analyze("--static", "--media", url, env={"REPO_PORTFOLIO_ALLOW_PRIVATE_MEDIA": "1"})
+            media = self.read("media/media_index.json")
+            self.assertEqual(media["items"][0]["source"], url)
+            self.assertEqual(media["items"][0]["type"], "unavailable")
+            self.assertIn("does not crawl pages", " ".join(media["warnings"]))
+            self.assertEqual(len(media["items"]), 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_direct_remote_video_uses_the_same_timestamped_frame_pipeline(self) -> None:
+        served = self.base / "served-video"
+        served.mkdir()
+        self.make_video(served / "demo.mp4")
+        try:
+            server = http.server.ThreadingHTTPServer(
+                ("127.0.0.1", 0), functools.partial(QuietHandler, directory=str(served)),
+            )
+        except PermissionError:
+            self.skipTest("the test sandbox does not permit loopback sockets")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/demo.mp4"
+            self.analyze("--static", "--media", url, env={"REPO_PORTFOLIO_ALLOW_PRIVATE_MEDIA": "1"})
+            item = self.read("media/media_index.json")["items"][0]
+            self.assertEqual(item["source"], url)
+            self.assertTrue(item["cached_path"].startswith("media/cache/"))
+            self.assertTrue(item["frames"])
+            self.assertTrue(all(frame["source"] == url and frame["timestamp_seconds"] is not None for frame in item["frames"]))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_remote_media_size_limit_is_enforced_before_download(self) -> None:
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), OversizedImageHandler)
+        except PermissionError:
+            self.skipTest("the test sandbox does not permit loopback sockets")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/large.png"
+            self.analyze("--static", "--media", url, env={"REPO_PORTFOLIO_ALLOW_PRIVATE_MEDIA": "1"})
+            item = self.read("media/media_index.json")["items"][0]
+            self.assertEqual(item["type"], "unavailable")
+            self.assertIn("exceeds the 25 MiB limit", item["warnings"][0])
+            cache_files = list((self.out / "media/cache").rglob("media.*"))
+            self.assertEqual(cache_files, [])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_youtube_unavailability_is_graceful_and_keeps_original_url(self) -> None:
+        self.write("src/main.py", "print('media')")
+        empty_bin = self.base / "empty-bin"
+        empty_bin.mkdir()
+        url = "https://www.youtube.com/watch?v=unavailable-test"
+        self.analyze("--static", "--media", url, env={"PATH": str(empty_bin)})
+        item = self.read("media/media_index.json")["items"][0]
+        self.assertEqual(item["source"], url)
+        self.assertEqual(item["original_url"], url)
+        self.assertEqual(item["type"], "unavailable")
+        self.assertIn("yt-dlp is unavailable", item["warnings"][0])
+
+    def test_youtube_metadata_captions_frames_and_provenance_are_retained(self) -> None:
+        video = self.base / "youtube-source.mp4"
+        self.make_video(video)
+        fake_bin = self.base / "fake-bin"
+        fake_bin.mkdir()
+        fake = fake_bin / "yt-dlp"
+        fake.write_text(
+            "#!/usr/bin/python3\n"
+            "import json, os, shutil, sys\n"
+            "args = sys.argv[1:]\n"
+            "with open(os.environ['FAKE_YTDLP_LOG'], 'a') as log: log.write(json.dumps(args) + '\\n')\n"
+            "if '--dump-single-json' in args:\n"
+            " print(json.dumps({'title':'Tool demo','duration':4.0,'webpage_url':args[-1],"
+            "'subtitles':{'en':[{'ext':'vtt'}]}})); raise SystemExit(0)\n"
+            "cache = args[args.index('--paths') + 1]\n"
+            "shutil.copyfile(os.environ['FAKE_VIDEO'], os.path.join(cache, 'media.mp4'))\n"
+            "open(os.path.join(cache, 'media.en.vtt'), 'w').write("
+            "'WEBVTT\\n\\n00:00:01.000 --> 00:00:02.000\\nVisible workflow\\n')\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        log = self.base / "yt-dlp.log"
+        url = "https://www.youtube.com/watch?v=abc123"
+        self.write("src/main.py", "print('media')")
+        self.analyze("--static", "--media", url, env={
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "FAKE_VIDEO": str(video), "FAKE_YTDLP_LOG": str(log),
+        })
+        item = self.read("media/media_index.json")["items"][0]
+        self.assertEqual(item["source"], url)
+        self.assertEqual(item["original_url"], url)
+        self.assertEqual(item["title"], "Tool demo")
+        self.assertEqual(item["duration"], 4.0)
+        self.assertEqual(item["caption_kind"], "human")
+        self.assertTrue(item["transcript_path"].startswith("media/cache/"))
+        self.assertTrue(item["frames"])
+        self.assertTrue(all(frame["source"] == url for frame in item["frames"]))
+        invocations = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertTrue(all("--no-config" in args and "--no-playlist" in args for args in invocations))
+
+    def test_normalized_project_json_is_traceable_to_evidence(self) -> None:
+        self.complete_static_workflow()
+        result = self.run_tool("validate", str(self.root))
+        report = json.loads(result.stdout)
+        self.assertTrue(report["artifact_analysis_finished"])
+        self.assertTrue(report["workflow_complete"])
+        self.assertTrue(report["valid"])
+
+        project = self.read("project.json")
+        project["semantic_summary"]["impact"] = [{
+            "statement": "An invented impact claim.", "status": "CONFIRMED",
+            "dimensions": ["impact.outcome"], "evidence_claim_ids": ["IMPACT-999"],
+        }]
+        (self.out / "project.json").write_text(json.dumps(project), encoding="utf-8")
+        invalid = self.run_tool("validate", str(self.root), check=False)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("not traceable", invalid.stdout)
+
+    def test_contradictory_testimony_retains_an_explicit_relationship(self) -> None:
+        self.write("tests/test_feature.py", "def test_feature(): assert True")
+        self.analyze()
+        self.set_plan([{"id": "D-TEST", "priority": "high", "reason": "Tests exist.", "focus": ["test strategy"]}])
+        observed = self.ingest_claim(
+            category="testing", claim="The repository contains an automated feature test.",
+            sources=[{"type": "TEST", "reference": "tests/test_feature.py:1"}], dimensions=["testing.automation"],
+        )
+        payload = [{
+            "category": "testing", "claim": "The developer remembers that the project had no automated tests.",
+            "status": "USER_CONFIRMED", "interview_question_id": "Q-TESTS",
+            "contradicts": [observed["id"]], "dimensions": ["testing.automation"],
+        }]
+        self.run_tool(
+            "ingest", str(self.root), "--kind", "interview", "--input",
+            str(self.payload("contradiction.json", payload)),
+        )
+        testimony = self.read("interview_evidence.json")["claims"][0]
+        self.assertEqual(testimony["contradicts"], [observed["id"]])
+        self.assertEqual(testimony["sources"][0]["type"], "USER_ATTESTATION")
+
+    def test_inventory_does_not_follow_external_symlinks_and_marks_sensitive_names(self) -> None:
+        outside = self.base / "outside"
+        outside.mkdir()
+        (outside / "secret.py").write_text("PASSWORD='hidden'", encoding="utf-8")
+        (self.root / "linked").symlink_to(outside, target_is_directory=True)
         self.write(".env", "TOKEN=secret")
-        self.write("README.md", "# Safe")
-        out = self.analyze("--static")
-        claims = self.read(out, "observed_evidence.json")["claims"]
-        refs = [source.get("reference", "") for item in claims for source in item["sources"]]
-        self.assertNotIn(".env", refs)
+        self.analyze("--static")
+        files = {item["path"]: item for item in self.read("inventory.json")["files"]}
+        self.assertNotIn("linked/secret.py", files)
+        self.assertTrue(files[".env"]["sensitive_name"])
+        serialized = json.dumps(self.read("inventory.json"))
+        self.assertNotIn("TOKEN=secret", serialized)
 
-    def test_gap_is_resolved_by_confirmed_artifact_evidence(self) -> None:
-        self.write("README.md", "# Tool")
-        out = self.analyze()
-        payload = [{
-            "category": "problem",
-            "claim": "Project documentation states that the tool was created to validate imported records.",
-            "status": "CONFIRMED",
-            "sources": [{"type": "DOCUMENTATION", "reference": "README.md:Purpose"}],
-        }]
-        payload_path = self.write("observed.json", json.dumps(payload))
-        self.run_tool("ingest", str(self.root), "--kind", "observed", "--input", str(payload_path))
-        questions = self.read(out, "interview_evidence.json")["questions"]
-        problem = next(q for q in questions if q["topic"] == "problem")
-        self.assertEqual(problem["status"], "resolved_by_evidence")
-        gap = self.read(out, "gap_analysis.json")
-        self.assertEqual(next(a for a in gap["assessment"] if a["topic"] == "problem")["completeness_percent"], 100)
-
-    def test_agent_observations_survive_refresh(self) -> None:
-        self.write("README.md", "# Tool")
-        out = self.analyze()
-        payload = [{
-            "category": "architecture", "claim": "The documented entry point is the main module.",
-            "status": "CONFIRMED", "sources": [{"type": "DOCUMENTATION", "reference": "README.md"}]
-        }]
-        payload_path = self.write("observed.json", json.dumps(payload))
-        self.run_tool("ingest", str(self.root), "--kind", "observed", "--input", str(payload_path))
-        claim_id = next(c["id"] for c in self.read(out, "observed_evidence.json")["claims"] if c["category"] == "architecture")
-        self.run_tool("analyze", str(self.root))
-        refreshed_ids = {c["id"] for c in self.read(out, "observed_evidence.json")["claims"]}
-        self.assertIn(claim_id, refreshed_ids)
-
-    def test_user_estimate_is_not_promoted_or_published(self) -> None:
-        self.write("main.py", "print('hello')")
-        out = self.analyze()
-        payload = {"claims": [{
-            "category": "impact", "claim": "The workflow saved approximately two hours per run.",
-            "status": "USER_ESTIMATE", "interview_question_id": "CTX-005", "public_safe": True
-        }]}
-        payload_path = self.write("estimate.json", json.dumps(payload))
-        self.run_tool("ingest", str(self.root), "--kind", "interview", "--input", str(payload_path))
-        estimate = next(c for c in self.read(out, "evidence.json")["claims"] if c["category"] == "impact")
-        self.assertEqual(estimate["status"], "USER_ESTIMATE")
-        self.assertNotIn(estimate["id"], (out / "public_safe_summary.md").read_text())
-        self.assertEqual(self.run_tool("validate", str(self.root)).returncode, 0)
-
-    def test_validator_rejects_static_runtime_claim(self) -> None:
-        self.write("tests/test_one.py", "def test_one(): assert True")
-        out = self.analyze()
-        payload = [{
-            "category": "testing", "claim": "The tests pass.", "status": "CONFIRMED",
-            "sources": [{"type": "TEST", "reference": "tests/test_one.py"}]
-        }]
-        payload_path = self.write("bad-runtime.json", json.dumps(payload))
-        self.run_tool("ingest", str(self.root), "--kind", "observed", "--input", str(payload_path))
+    def test_validator_rejects_runtime_success_claimed_from_static_artifacts(self) -> None:
+        self.complete_static_workflow()
+        for name in ("observed_evidence.json", "evidence.json"):
+            store = self.read(name)
+            store["claims"][0]["category"] = "testing"
+            store["claims"][0]["claim"] = "The tests pass."
+            store["claims"][0]["sources"] = [{"type": "TEST", "reference": "tests/test_main.py"}]
+            (self.out / name).write_text(json.dumps(store), encoding="utf-8")
         result = self.run_tool("validate", str(self.root), check=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("asserts runtime behavior", result.stdout)
+        self.assertIn("asserts runtime behavior from static evidence", result.stdout)
 
-    def test_external_symlink_is_not_traversed(self) -> None:
-        outside = self.root.parent / f"{self.root.name}-outside"
-        outside.mkdir()
-        (outside / "secret.py").write_text("PASSWORD='hidden'")
-        (self.root / "linked").symlink_to(outside, target_is_directory=True)
-        try:
-            out = self.analyze("--static")
-            files = {entry["path"] for entry in self.read(out, "inventory.json")["files"]}
-            self.assertNotIn("linked/secret.py", files)
-        finally:
-            (self.root / "linked").unlink(missing_ok=True)
-            (outside / "secret.py").unlink(missing_ok=True)
-            outside.rmdir()
+    def test_doctor_accepts_supported_interpreter_range(self) -> None:
+        report = json.loads(self.run_tool("doctor").stdout)
+        self.assertEqual(report["minimum_python"], "3.9")
+        self.assertTrue(report["python_supported"])
 
 
 if __name__ == "__main__":

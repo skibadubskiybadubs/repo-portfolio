@@ -1,41 +1,38 @@
 # Workflow Reference
 
-## Contents
+## Phases
 
-1. Modes and phases
-2. Discovery and planning
-3. Static analysis
-4. Completion behavior
+1. Deterministic discovery and media preprocessing.
+2. Codex-authored project profile and dynamic analysis plan.
+3. Codex semantic artifact investigation with persisted domain coverage.
+4. Codex-authored gap selection and artifact/interview routing.
+5. One-question-at-a-time project grill.
+6. Codex semantic reconciliation and synthesis.
+7. Deterministic validation.
 
-## Modes and phases
+Modes remain default, static, deep, media, and resume. Static skips the interview but not semantic artifact investigation. Deep expands scan and investigation scope. Resume is allowed only after repository compatibility checks.
 
-- **Default**: discover, analyze, interview, reconcile, generate, validate.
-- **Static**: perform every phase except the interview; preserve questions for later.
-- **Deep**: increase scan budgets and inspect additional architectural and historical seams.
-- **Media**: include one or more repository-external image/video paths.
-- **Resume**: continue the persisted session and pending interview without discarding earlier answers.
+## Dynamic plan
 
-The persisted phases are `discovered`, `artifact_analysis`, `interview_ready`, `interviewing`, `complete`, and `static_complete`.
+Create the plan after reading deterministic discovery outputs. Include only relevant domains. Every domain needs an ID, priority (`high`, `medium`, or `low`), evidence-based reason, and focused investigation targets. Unknown ecosystems need an ad-hoc investigation brief based on observed conventions.
 
-## Discovery and planning
+Persist the plan before investigation. The helper creates matching `PENDING` coverage records. Do not begin the interview until all records are terminal.
 
-Start from structure, extensions, manifests, build/configuration files, CI, tests, documentation, entry points, Git metadata, installers, deployment assets, and media. Infer a provisional profile. If an ecosystem is unknown, derive an investigation brief from its manifests, file clusters, naming conventions, entry points, and dependency declarations.
+## Coverage
 
-Always consider product/purpose and architecture. Select other domains only when evidence makes them relevant: automation/domain rules, interface/UX, testing, delivery, reliability, performance, maintenance, decisions, integrations, and ecosystem-specific extensions.
+- `COMPLETE`: the intended investigation was performed.
+- `PARTIAL`: useful investigation was performed but material scope remains; include reason and 1–99 completion percent.
+- `NOT_APPLICABLE`: later evidence established that the domain does not apply; include reason and evidence/profile references.
+- `BLOCKED`: the investigation could not be performed; include reason.
 
-## Static analysis
+`artifact_analysis_finished` becomes true when no planned domain is `PENDING`. `evidence_completeness` communicates depth; it is not a completion gate. Partial and blocked domains remain visible in the dossier and validation result.
 
-Prioritize evidence that changes the project model:
+## Static investigation
 
-1. Entry points, public interfaces, workflows, and component boundaries.
-2. Domain transformations, validation, orchestration, and human interaction points.
-3. Test types and what behavior they assert, without claiming they pass.
-4. Packaging, installation, CI/deployment definitions, diagnostics, and configuration.
-5. Git evolution: lifespan, releases, migrations, refactors, maintenance, test growth, and contributor context.
-6. Media-visible workflows and results with filenames and timestamps.
+Prioritize entry points, workflows, component boundaries, domain transformations, tests and asserted behavior, delivery/configuration, Git evolution, reliability patterns, and media-visible behavior. Never claim runtime success from static artifacts.
 
-Do not inspect generated/vendor directories unless they are themselves relevant evidence. Do not copy credentials, customer data, tokens, private URLs, or large proprietary excerpts into outputs.
+Do not inspect generated/vendor directories unless they are relevant evidence. Do not copy credentials, private data, tokens, or large proprietary excerpts into outputs.
 
-## Completion behavior
+## Completion
 
-Reconcile after every meaningful evidence batch. A valid run produces the universal machine-readable model, three evidence stores, dossier, prioritized questions, sanitized summary, media index, and resumable state. Unknowns are a valid outcome. Validation success means the dossier is internally consistent, not that project runtime behavior was verified.
+Default mode is complete only after artifact coverage is terminal, Codex declares the interview/reconciliation terminal, all required outputs exist, and validation passes. Static mode may finish with unresolved contextual questions. Unknowns, partial evidence, and blocked domains are legitimate outcomes.
