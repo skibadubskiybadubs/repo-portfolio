@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.2",
+  "canonical_claim": {
+    "id": "ARCH-001",
+    "category": "architecture",
+    "claim": "One material proposition only.",
+    "status": "CONFIRMED",
+    "sources": [{"type": "SOURCE_CODE", "reference": "src/module.py:Symbol", "evidence_scope": "ANALYSIS_ROOT"}],
+    "career_signals": [],
+    "public_safe": false,
+    "sensitive": false,
+    "supports": [],
+    "contradicts": [],
+    "dimensions": [],
+    "derived_from_claim_ids": ["ARCH-001"]
+  },
+  "gap_resolution": {
+    "dimensions": [{"id": "impact.outcome", "topic": "impact", "relevant": true, "relevance_reason": "Project-grounded reason", "weight": 3, "resolution_channel": "INTERVIEW", "evidence_claim_ids": []}],
+    "gaps": [{"id": "GAP-IMPACT", "topic": "impact", "dimension_id": "impact.outcome", "importance": 90, "basis_references": ["project_profile.json"], "rationale": "Why this unresolved fact matters"}]
+  },
+  "analysis_coverage": {
+    "domains": [{"domain_id": "D-ARCH", "state": "COMPLETE", "inspected_references": ["src/module.py"], "evidence_claim_ids": ["ARCH-001"], "findings_summary": "What was investigated"}]
+  },
+  "video_analysis_update": {
+    "media_id": "MEDIA-001",
+    "batch_id": "BATCH-001",
+    "batch_state": "COMPLETE",
+    "analysis_state": "IN_PROGRESS",
+    "observations": [{"id": "VIDEO-OBS-001", "observation": "Visible workflow behavior", "frame_ids": ["FRAME-ID"], "transcript_cue_ids": [], "evidence_claim_ids": []}],
+    "workflow_phases": [],
+    "limitations": []
+  },
+  "project_json": {
+    "schema_version": "1.2",
+    "project": {}, "problem": [], "users": [], "workflows": [], "technology": [],
+    "architecture": [], "automation": [], "testing": [], "delivery": [], "maintenance": [],
+    "ownership": [], "impact": [], "decisions": [], "career_signals": [], "unknowns": [],
+    "extensions": {},
+    "semantic_summary": {"architecture": [{"statement": "Traceable statement", "status": "CONFIRMED", "dimensions": [], "evidence_claim_ids": ["ARCH-001"]}]}
+  },
+  "final_synthesis_inputs": {
+    "project": {
+      "schema_version": "1.2",
+      "project": {}, "problem": [], "users": [], "workflows": [], "technology": [],
+      "architecture": [], "automation": [], "testing": [], "delivery": [], "maintenance": [],
+      "ownership": [], "impact": [], "decisions": [], "career_signals": [], "unknowns": [],
+      "extensions": {},
+      "semantic_summary": {"architecture": [{"statement": "Traceable statement", "status": "CONFIRMED", "dimensions": [], "evidence_claim_ids": ["ARCH-001"]}]}
+    },
+    "dossier": "Markdown containing every active canonical claim ID",
+    "public_safe_summary": "Markdown containing only eligible public-safe claim IDs"
+  }
+}

@@ -81,15 +81,17 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
 
 
-def ffprobe_media(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+def ffprobe_media(path: Path, workdir: Path | None = None) -> tuple[dict[str, Any] | None, str | None]:
     executable = shutil.which("ffprobe")
     if not executable:
         return None, "ffprobe is unavailable; video metadata could not be verified."
+    cwd = workdir or path.parent
+    cwd.mkdir(parents=True, exist_ok=True)
     code, stdout, stderr = run_process([
         executable, "-v", "error", "-show_entries",
-        "format=duration,format_name:stream=codec_name,width,height,duration",
+        "format=duration,format_name:stream=index,codec_type,codec_name,width,height,duration:stream_tags=language,title",
         "-of", "json", str(path),
-    ], path.parent, 45)
+    ], cwd, 45)
     if code:
         return None, f"ffprobe failed for {path.name}: {stderr or 'unknown error'}"
     try:
@@ -112,7 +114,21 @@ def duration_from_metadata(metadata: dict[str, Any] | None) -> float | None:
     return None
 
 
-def extract_frames(path: Path, destination: Path, out: Path, source: str) -> tuple[list[dict[str, Any]], list[str]]:
+def sampling_limits(duration: float | None) -> tuple[int, int]:
+    if duration is None or duration <= 0:
+        return 12, 24
+    if duration < 120:
+        return 20, 30
+    if duration < 300:
+        return 30, 45
+    if duration < 900:
+        return 40, 60
+    return 48, 72
+
+
+def extract_frames(
+    path: Path, destination: Path, out: Path, source: str, duration: float | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
     executable = shutil.which("ffmpeg")
     if not executable:
         return [], ["ffmpeg is unavailable; representative frames were not extracted."]
@@ -120,43 +136,101 @@ def extract_frames(path: Path, destination: Path, out: Path, source: str) -> tup
     for existing in destination.glob("*.png"):
         existing.unlink()
 
-    def attempt(prefix: str, filter_value: str, method: str) -> tuple[list[dict[str, Any]], str | None]:
+    periodic_target, maximum = sampling_limits(duration)
+
+    def attempt(prefix: str, filter_value: str, method: str, limit: int) -> tuple[list[dict[str, Any]], str | None]:
         pattern = destination / f"{prefix}-%03d.png"
         code, _, stderr = run_process([
             executable, "-y", "-hide_banner", "-loglevel", "info", "-i", str(path),
-            "-vf", filter_value, "-fps_mode", "vfr", "-frames:v", "12", str(pattern),
-        ], path.parent, 120)
+            "-vf", filter_value, "-fps_mode", "vfr", "-frames:v", str(limit), str(pattern),
+        ], destination, 120)
         files = sorted(destination.glob(f"{prefix}-*.png"))
         pts = [float(value) for value in re.findall(r"pts_time:\s*([0-9]+(?:\.[0-9]+)?)", stderr)]
         frames = []
         for index, frame in enumerate(files):
-            seconds = pts[index] if index < len(pts) else (index * 30.0 if method == "periodic" else None)
+            seconds = pts[index] if index < len(pts) else None
+            if seconds is None:
+                frame.unlink(missing_ok=True)
+                continue
             frames.append({
                 "path": cache_relative(frame, out),
                 "sequence": index + 1,
                 "source": source,
                 "timestamp_seconds": seconds,
                 "timestamp": format_timestamp(seconds) if seconds is not None else None,
-                "timestamp_method": "decoded_pts" if index < len(pts) else "periodic_estimate",
+                "sampling_methods": [method], "timestamp_method": "decoded_pts",
             })
         if code and not frames:
             return [], stderr or "unknown ffmpeg error"
         return frames, None
 
-    frames, error = attempt(
-        "scene", "select=gt(scene\\,0.35),showinfo,scale=min(1600\\,iw):-2", "scene"
+    interval = max(0.25, (duration or periodic_target * 5) / max(1, periodic_target))
+    periodic, periodic_error = attempt(
+        "periodic",
+        f"select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,{interval:.6f}),showinfo,scale=min(1600\\,iw):-2",
+        "periodic", periodic_target,
     )
-    if not frames or any(frame["timestamp_seconds"] is None for frame in frames):
-        for existing in destination.glob("scene-*.png"):
-            existing.unlink()
-        frames, fallback_error = attempt(
-            "periodic",
-            "select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,30),showinfo,scale=min(1600\\,iw):-2",
-            "periodic",
-        )
-        error = fallback_error or error
-    warnings = [f"ffmpeg failed for {path.name}: {error}"] if error and not frames else []
-    return frames, warnings
+    scenes, scene_error = attempt(
+        "scene", "select=gt(scene\\,0.30),showinfo,scale=min(1600\\,iw):-2",
+        "scene_change", maximum,
+    )
+    selected = list(periodic)
+    tolerance = max(0.5, (duration or 60) / max(1, maximum * 6))
+    hashes = set()
+    for frame in selected:
+        try:
+            hashes.add(hashlib.sha256((out / frame["path"]).read_bytes()).hexdigest())
+        except OSError:
+            pass
+    for frame in scenes:
+        close = next((value for value in selected if abs(value["timestamp_seconds"] - frame["timestamp_seconds"]) <= tolerance), None)
+        frame_path = out / frame["path"]
+        digest = None
+        try:
+            digest = hashlib.sha256(frame_path.read_bytes()).hexdigest()
+        except OSError:
+            pass
+        if close:
+            close["sampling_methods"] = sorted(set(close["sampling_methods"] + frame["sampling_methods"]))
+            frame_path.unlink(missing_ok=True)
+        elif digest and digest in hashes:
+            frame_path.unlink(missing_ok=True)
+        elif len(selected) < maximum:
+            selected.append(frame)
+            if digest:
+                hashes.add(digest)
+        else:
+            frame_path.unlink(missing_ok=True)
+    selected.sort(key=lambda value: value["timestamp_seconds"])
+    for index, frame in enumerate(selected):
+        frame["sequence"] = index + 1
+        identity = f"{source}|{frame['timestamp_seconds']:.6f}"
+        frame["id"] = f"FRAME-{hashlib.sha256(identity.encode()).hexdigest()[:12].upper()}"
+    warnings = []
+    if periodic_error and not periodic:
+        warnings.append(f"ffmpeg periodic sampling failed for {path.name}: {periodic_error}")
+    if scene_error and not scenes:
+        warnings.append(f"ffmpeg scene sampling produced no supplemental frames for {path.name}.")
+    return selected, warnings
+
+
+def extract_embedded_captions(path: Path, probe: dict[str, Any] | None, destination: Path) -> tuple[Path | None, list[dict[str, Any]], str | None]:
+    streams = [value for value in (probe or {}).get("streams", []) if value.get("codec_type") == "subtitle"]
+    executable = shutil.which("ffmpeg")
+    if not streams or not executable:
+        return None, [], None
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / "embedded.vtt"
+    code, _, error = run_process([
+        executable, "-y", "-hide_banner", "-loglevel", "error", "-i", str(path),
+        "-map", f"0:{streams[0]['index']}", "-f", "webvtt", str(target),
+    ], destination, 60)
+    if code or not target.is_file():
+        return None, [], f"Embedded captions could not be extracted: {error or 'unsupported subtitle stream'}"
+    cues = subtitle_to_cues(target)
+    transcript = destination / "transcript.json"
+    transcript.write_text(json.dumps({"kind": "embedded", "cues": cues}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return transcript, cues, None
 
 
 def image_signature(data: bytes) -> str | None:
@@ -237,7 +311,7 @@ def retrieve_direct(url: str, cache: Path) -> dict[str, Any]:
     validate_public_host(url)
     cache.mkdir(parents=True, exist_ok=True)
     opener = urllib.request.build_opener(LimitedRedirectHandler())
-    request = urllib.request.Request(url, headers={"User-Agent": "Repo-Portfolio/1.1", "Accept": "image/*,video/*"})
+    request = urllib.request.Request(url, headers={"User-Agent": "Repo-Portfolio/1.2", "Accept": "image/*,video/*"})
     started = utc_now()
     try:
         with opener.open(request, timeout=30) as response:
@@ -311,7 +385,7 @@ def subtitle_to_cues(path: Path) -> list[dict[str, Any]]:
         seconds = hours * 3600 + int(match.group(2)) * 60 + int(match.group(3)) + int(match.group(4)) / 1000
         body = re.sub(r"<[^>]+>", "", match.group(5)).replace("\n", " ").strip()
         if body:
-            cues.append({"timestamp_seconds": seconds, "timestamp": format_timestamp(seconds), "text": body})
+            cues.append({"id": f"CUE-{len(cues) + 1:04d}", "timestamp_seconds": seconds, "timestamp": format_timestamp(seconds), "text": body})
     return cues
 
 
@@ -446,21 +520,89 @@ def collect_media(project: Path, inventory_files: list[dict[str, Any]], inputs: 
             "title": metadata.get("title"), "mime_type": metadata.get("mime_type") or mimetypes.guess_type(path.name)[0],
             "size": path.stat().st_size, "cached_path": cache_relative(path, out) if metadata.get("original_url") else None,
             "local_path": str(path.resolve()), "duration": metadata.get("duration"), "warnings": [],
+            "evidence_scope": (
+                "EXTERNAL_SUPPORTING_EVIDENCE"
+                if metadata.get("original_url") or not path.resolve().is_relative_to(project.resolve())
+                else "ANALYSIS_ROOT"
+            ),
         }
         if media_type == "video":
-            probe, warning = ffprobe_media(path)
+            probe, warning = ffprobe_media(path, out / "media" / "work")
             item["probe"] = probe
             item["duration"] = item["duration"] or duration_from_metadata(probe)
+            cues: list[dict[str, Any]] = []
+            transcript_path = metadata.get("transcript_path")
+            if transcript_path:
+                cues = (json.loads(Path(transcript_path).read_text(encoding="utf-8")) or {}).get("cues", [])
+            else:
+                transcript_path, cues, caption_warning = extract_embedded_captions(
+                    path, probe, out / "media" / "transcripts" / hashlib.sha256(canonical.encode()).hexdigest()[:12],
+                )
+                if caption_warning:
+                    item["warnings"].append(caption_warning)
             frames, frame_warnings = extract_frames(
-                path, out / "media" / "extracted_frames" / hashlib.sha256(canonical.encode()).hexdigest()[:12], out, canonical
+                path, out / "media" / "extracted_frames" / hashlib.sha256(canonical.encode()).hexdigest()[:12],
+                out, canonical, item["duration"],
             )
             item["frames"] = frames
             item["caption_language"] = metadata.get("caption_language")
             item["caption_kind"] = metadata.get("caption_kind")
             item["caption_path"] = cache_relative(metadata["caption_path"], out) if metadata.get("caption_path") else None
-            item["transcript_path"] = cache_relative(metadata["transcript_path"], out) if metadata.get("transcript_path") else None
+            item["transcript_path"] = cache_relative(Path(transcript_path), out) if transcript_path else None
+            item["transcript_cue_count"] = len(cues)
+            batches = []
+            for offset in range(0, len(frames), 8):
+                group = frames[offset:offset + 8]
+                start = group[0]["timestamp_seconds"]
+                end = group[-1]["timestamp_seconds"]
+                batches.append({
+                    "id": f"BATCH-{len(batches) + 1:03d}",
+                    "frame_ids": [frame["id"] for frame in group],
+                    "start_seconds": start, "end_seconds": end,
+                    "transcript_cue_ids": [
+                        cue["id"] for cue in cues
+                        if start <= cue.get("timestamp_seconds", -1) <= end
+                    ][:50],
+                })
+            item["analysis_batches"] = batches
             if warning:
                 item["warnings"].append(warning)
             item["warnings"].extend(frame_warnings)
         items.append(item)
-    return {"schema_version": "1.1", "generated_at": utc_now(), "items": items, "warnings": warnings}
+    return {"schema_version": "1.2", "generated_at": utc_now(), "items": items, "warnings": warnings}
+
+
+def initial_video_analysis(media: dict[str, Any], prior: dict[str, Any] | None = None) -> dict[str, Any]:
+    previous = {value.get("source"): value for value in (prior or {}).get("videos", [])}
+    videos = []
+    for item in media.get("items", []):
+        if item.get("type") != "video":
+            continue
+        old = previous.get(item.get("source"), {})
+        valid_batches = {batch["id"] for batch in item.get("analysis_batches", [])}
+        valid_frames = {frame["id"] for frame in item.get("frames", [])}
+        valid_timestamps = {frame["timestamp_seconds"] for frame in item.get("frames", [])}
+        observations = [
+            value for value in old.get("observations", [])
+            if set(value.get("frame_ids", [])).issubset(valid_frames)
+        ]
+        batch_state = {
+            key: value for key, value in old.get("batch_state", {}).items()
+            if key in valid_batches
+        }
+        changed_media = len(observations) != len(old.get("observations", []))
+        videos.append({
+            "media_id": item["id"], "source": item["source"], "duration": item.get("duration"),
+            "analysis_state": "PENDING" if changed_media else old.get("analysis_state", "PENDING"),
+            "batch_state": batch_state,
+            "timestamps_inspected": [value for value in old.get("timestamps_inspected", []) if value in valid_timestamps],
+            "workflow_phases": old.get("workflow_phases", []),
+            "observations": observations,
+            "transcript_cues_used": old.get("transcript_cues_used", []),
+            "evidence_claim_ids": sorted({
+                claim_id for observation in observations
+                for claim_id in observation.get("evidence_claim_ids", [])
+            }),
+            "limitations": old.get("limitations", []),
+        })
+    return {"schema_version": "1.2", "updated_at": utc_now(), "videos": videos}

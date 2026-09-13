@@ -25,14 +25,15 @@ from typing import Any, Iterable
 
 # Running the installed skill must not mutate its own directory.
 sys.dont_write_bytecode = True
-from media_support import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, collect_media
+from media_support import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, collect_media, initial_video_analysis
 
 
-SCHEMA_VERSION = "1.1"
-SUPPORTED_LEGACY = {"1.0", SCHEMA_VERSION}
+SCHEMA_VERSION = "1.2"
+SUPPORTED_LEGACY = {"1.0", "1.1", SCHEMA_VERSION}
 MIN_PYTHON = (3, 9)
 OUTPUT_NAME = ".repo-portfolio"
 COVERAGE_STATES = {"PENDING", "COMPLETE", "PARTIAL", "NOT_APPLICABLE", "BLOCKED"}
+MEDIA_ANALYSIS_STATES = COVERAGE_STATES | {"IN_PROGRESS"}
 TERMINAL_COVERAGE = COVERAGE_STATES - {"PENDING"}
 PRIORITY_WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 INTERVIEW_STATES = {"NOT_STARTED", "IN_PROGRESS", "COMPLETE", "STOPPED_WITH_UNKNOWNS", "NOT_APPLICABLE"}
@@ -45,6 +46,12 @@ STATUS_COMPLETENESS = {
     "STRONG_INFERENCE": 65, "WEAK_INFERENCE": 30,
     "USER_CONFIRMATION_REQUIRED": 15, "UNKNOWN": 0, "CONTRADICTED": 10,
 }
+STATUS_STRENGTH = {
+    "UNKNOWN": 0, "CONTRADICTED": 0, "USER_CONFIRMATION_REQUIRED": 1,
+    "WEAK_INFERENCE": 2, "STRONG_INFERENCE": 3, "USER_ESTIMATE": 4,
+    "USER_CONFIRMED": 5, "CONFIRMED": 6,
+}
+EVIDENCE_SCOPES = {"ANALYSIS_ROOT", "EXTERNAL_SUPPORTING_EVIDENCE"}
 SOURCE_TYPES = {
     "SOURCE_CODE", "TEST", "CONFIG", "BUILD_OR_PACKAGE_METADATA", "GIT_HISTORY",
     "DOCUMENTATION", "SCREENSHOT", "VIDEO", "USER_ATTESTATION", "USER_ESTIMATE", "INFERENCE",
@@ -63,6 +70,7 @@ CORE_KEYS = [
 REQUIRED_OUTPUTS = [
     "dossier.md", "project.json", "observed_evidence.json", "interview_evidence.json",
     "evidence.json", "open_questions.md", "public_safe_summary.md", "media/media_index.json",
+    "media/video_analysis.json",
 ]
 REQUIRED_DIRECTORIES = ["media/extracted_frames"]
 IGNORED_DIRS = {
@@ -146,7 +154,25 @@ def canonical_digest(value: Any) -> str:
 
 
 def output_dir(project: Path, explicit: str | None = None) -> Path:
-    return Path(explicit).expanduser().resolve() if explicit else project / OUTPUT_NAME
+    """Return the only permitted project write root, rejecting redirects/symlinks."""
+    expected = project / OUTPUT_NAME
+    if expected.is_symlink():
+        raise ValueError(f"{OUTPUT_NAME} must not be a symlink.")
+    expected_resolved = expected.resolve()
+    candidate = Path(explicit).expanduser().resolve() if explicit else expected_resolved
+    if candidate != expected_resolved:
+        raise ValueError(f"Analysis output must be exactly {expected_resolved}.")
+    if expected_resolved.exists():
+        for root, directories, files in os.walk(expected_resolved, followlinks=False):
+            root_path = Path(root)
+            if any((root_path / name).is_symlink() for name in directories + files):
+                raise ValueError(f"{OUTPUT_NAME} must not contain symlinks.")
+    return expected_resolved
+
+
+def safe_archive_id(value: Any) -> str:
+    text = str(value or "")
+    return text if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", text) else hashlib.sha256(text.encode()).hexdigest()[:24]
 
 
 def is_sensitive(reference: str) -> bool:
@@ -233,7 +259,8 @@ def inventory_project(project: Path, deep: bool) -> dict[str, Any]:
         "extensions": sorted(extensions),
     })
     return {
-        "schema_version": SCHEMA_VERSION, "generated_at": now(), "project_root": str(project),
+        "schema_version": SCHEMA_VERSION, "generated_at": now(),
+        "analysis_root": str(project), "project_root": str(project),
         "file_count": len(entries), "truncated": truncated, "fingerprint": fingerprint,
         "structure_signature": structure, "hashed_bytes": hashed,
         "counts_by_kind": dict(sorted(kinds.items())),
@@ -263,6 +290,38 @@ def discovery_profile(inventory: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def supporting_evidence(inputs: Iterable[str], project: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    items: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for raw in inputs:
+        path = Path(raw).expanduser().resolve()
+        if not path.is_file() or path.is_symlink():
+            warnings.append(f"Supporting evidence must be an existing regular file: {raw}")
+            continue
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            stat = path.stat()
+        except OSError as exc:
+            warnings.append(f"Supporting evidence could not be read ({path.name}): {exc}")
+            continue
+        try:
+            reference = path.relative_to(project).as_posix()
+            scope = "ANALYSIS_ROOT"
+        except ValueError:
+            reference = str(path)
+            scope = "EXTERNAL_SUPPORTING_EVIDENCE"
+        items.append({
+            "id": f"SUPPORT-{hashlib.sha256(str(path).encode()).hexdigest()[:12].upper()}",
+            "source": reference, "source_path": str(path), "evidence_scope": scope,
+            "size": stat.st_size, "content_sha256": digest.hexdigest(),
+            "kind": classify_kind(path.name, path.suffix.lower()),
+        })
+    return items, warnings
+
+
 def run_git(args: list[str], project: Path, timeout: int = 30) -> tuple[int, str, str]:
     try:
         result = subprocess.run(
@@ -279,27 +338,41 @@ def git_facts(project: Path) -> dict[str, Any]:
     if code:
         return {"available": False, "warnings": ["No readable Git work tree was found."]}
     _, root, _ = run_git(["rev-parse", "--show-toplevel"], project)
-    _, head, _ = run_git(["rev-parse", "HEAD"], project)
-    _, tree, _ = run_git(["rev-parse", "HEAD^{tree}"], project)
+    git_root = Path(root).resolve()
+    try:
+        pathspec = project.resolve().relative_to(git_root).as_posix()
+    except ValueError:
+        return {"available": False, "warnings": ["The analysis root is not contained by the discovered Git root."]}
+    literal_pathspec = ":(literal)." if pathspec == "." else f":(literal){pathspec}"
+    _, repository_head, _ = run_git(["rev-parse", "HEAD"], git_root)
+    _, scoped_head, _ = run_git(["log", "-1", "--format=%H", "--", literal_pathspec], git_root)
+    tree_args = ["rev-parse", "HEAD^{tree}"] if pathspec == "." else ["rev-parse", f"HEAD:{pathspec}"]
+    _, tree, _ = run_git(tree_args, git_root)
     _, roots, _ = run_git(["rev-list", "--max-parents=0", "HEAD"], project)
-    _, remote, _ = run_git(["config", "--get", "remote.origin.url"], project)
-    _, status, _ = run_git(["status", "--porcelain=v1", "--untracked-files=all"], project)
+    _, remote, _ = run_git(["config", "--get", "remote.origin.url"], git_root)
+    _, status, _ = run_git(["status", "--porcelain=v1", "--untracked-files=all", "--", literal_pathspec], git_root)
     def belongs_to_output(line: str) -> bool:
         paths = line[3:].split(" -> ") if len(line) >= 4 else [line]
-        return any(path.strip('"') == OUTPUT_NAME or path.strip('"').startswith(f"{OUTPUT_NAME}/") for path in paths)
+        output_prefix = OUTPUT_NAME if pathspec == "." else f"{pathspec}/{OUTPUT_NAME}"
+        return any(path.strip('"') == output_prefix or path.strip('"').startswith(f"{output_prefix}/") for path in paths)
     status = "\n".join(line for line in status.splitlines() if not belongs_to_output(line))
     _, log, log_error = run_git([
         "log", "--date=iso-strict", "--pretty=format:%H%x09%aI%x09%an%x09%ae%x09%s", "-n", "5000",
-    ], project)
+        "--", literal_pathspec,
+    ], git_root)
     commits = []
     for line in log.splitlines():
         parts = line.split("\t", 4)
         if len(parts) == 5:
             commits.append({"hash": parts[0], "date": parts[1], "author": parts[2], "email": parts[3], "subject": parts[4]})
     contributors = Counter((item["author"], item["email"]) for item in commits)
-    _, tags, _ = run_git(["tag", "--list"], project)
+    tags = ""
+    if pathspec == ".":
+        _, tags, _ = run_git(["tag", "--list"], git_root)
     return {
-        "available": True, "repository_root": root, "head": head or None, "tree": tree or None,
+        "available": True, "analysis_root": str(project), "git_root": str(git_root),
+        "repository_root": str(git_root), "git_pathspec": pathspec,
+        "repository_head": repository_head or None, "head": scoped_head or None, "tree": tree or None,
         "root_commits": roots.splitlines(), "remote_hash": hashlib.sha256(remote.encode()).hexdigest() if remote else None,
         "dirty_digest": hashlib.sha256(status.encode()).hexdigest(), "commit_count_scanned": len(commits),
         "first_commit_date": commits[-1]["date"] if commits else None,
@@ -365,7 +438,7 @@ def compatibility(prior: dict[str, Any], identity: dict[str, Any], inventory: di
 def archive_session(out: Path, session: dict[str, Any]) -> str | None:
     if not session:
         return None
-    archive_id = session.get("session_id", datetime.now().strftime("%Y%m%d%H%M%S"))
+    archive_id = safe_archive_id(session.get("session_id", datetime.now().strftime("%Y%m%d%H%M%S")))
     destination = out / "history" / archive_id
     destination.mkdir(parents=True, exist_ok=True)
     for relative in REQUIRED_OUTPUTS + [
@@ -401,15 +474,23 @@ def mark_claims(data: dict[str, Any], currency: str) -> dict[str, Any]:
     return data
 
 
-def current_snapshot(project: Path, deep: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+def current_snapshot(
+    project: Path, deep: bool = False, supporting_inputs: Iterable[str] = (),
+) -> tuple[dict[str, Any], dict[str, Any]]:
     inventory = inventory_project(project, deep)
+    external, warnings = supporting_evidence(supporting_inputs, project)
+    inventory["external_supporting_evidence"] = external
+    inventory["warnings"].extend(warnings)
+    inventory["fingerprint"] = canonical_digest([inventory["fingerprint"], external])
     git = git_facts(project)
     return inventory, git
 
 
 def ensure_snapshot(project: Path, out: Path) -> tuple[bool, str | None]:
     session = read_json(out / "session.json", {})
-    inventory, git = current_snapshot(project, session.get("mode") == "deep")
+    inventory, git = current_snapshot(
+        project, session.get("mode") == "deep", session.get("supporting_evidence_inputs", []),
+    )
     identity = repository_identity(project, inventory, git, session)
     if identity["snapshot_id"] != session.get("repository_identity", {}).get("snapshot_id"):
         return False, "Repository state changed after discovery; rerun analyze before continuing."
@@ -435,6 +516,9 @@ def normalize_claim(item: dict[str, Any], kind: str, snapshot_id: str) -> dict[s
             reference = source.get("reference")
             if not isinstance(reference, str) or not reference.strip():
                 raise ValueError(f"Artifact source {source.get('type')} requires a non-empty reference.")
+            if source.get("evidence_scope") not in {None, *EVIDENCE_SCOPES}:
+                raise ValueError(f"Invalid evidence scope {source.get('evidence_scope')}.")
+            source.setdefault("evidence_scope", "ANALYSIS_ROOT")
     return {
         "id": str(item.get("id", "")).strip(), "category": str(item.get("category", "project")).lower().strip(),
         "claim": str(item.get("claim", "")).strip(), "status": status, "sources": sources,
@@ -554,7 +638,9 @@ def analyze(args: argparse.Namespace) -> int:
     prior_session = read_json(out / "session.json", {})
     prior_observed = read_json(out / "observed_evidence.json", empty_store("observed"))
     prior_interview = read_json(out / "interview_evidence.json", empty_store("interview"))
-    inventory, git = current_snapshot(project, args.deep)
+    prior_inputs = prior_session.get("supporting_evidence_inputs", []) if not args.supporting_evidence else []
+    support_inputs = list(args.supporting_evidence or prior_inputs)
+    inventory, git = current_snapshot(project, args.deep, support_inputs)
     identity = repository_identity(project, inventory, git, prior_session)
     result = compatibility(prior_session, identity, inventory)
     archive = None
@@ -581,7 +667,10 @@ def analyze(args: argparse.Namespace) -> int:
     profile["deterministic_signals"]["has_git"] = bool(git.get("available"))
     session = {
         "schema_version": SCHEMA_VERSION, "session_id": prior_session.get("session_id") if result == "EXACT" else uuid.uuid4().hex,
-        "project_root": str(project), "output_directory": str(out), "repository_identity": identity,
+        "analysis_root": str(project), "project_root": str(project),
+        "git_root": git.get("git_root"), "git_pathspec": git.get("git_pathspec"),
+        "output_directory": str(out), "repository_identity": identity,
+        "supporting_evidence_inputs": support_inputs,
         "compatibility": result, "previous_archive": archive,
         "mode": "static" if args.static else ("deep" if args.deep else "default"),
         "phase": "artifact_analysis",
@@ -604,6 +693,8 @@ def analyze(args: argparse.Namespace) -> int:
     atomic_json(out / "project_profile.json", profile)
     atomic_json(out / "git_history.json", git)
     atomic_json(out / "media" / "media_index.json", media)
+    prior_video = read_json(out / "media" / "video_analysis.json", {}) if result == "EXACT" else {}
+    atomic_json(out / "media" / "video_analysis.json", initial_video_analysis(media, prior_video))
     atomic_json(out / "observed_evidence.json", observed)
     atomic_json(out / "interview_evidence.json", interview)
     if result != "EXACT":
@@ -708,6 +799,14 @@ def ingest(args: argparse.Namespace) -> int:
         for item in read_json(out / name, {"claims": []}).get("claims", [])
     ]
     assign_ids(incoming, existing)
+    source_errors = [
+        f"{item['id']}: {error}"
+        for item in incoming for source in item.get("sources", [])
+        for error in external_source_errors(source, out)
+    ]
+    if source_errors:
+        print(json.dumps({"errors": source_errors}, indent=2), file=sys.stderr)
+        return 2
     data.setdefault("claims", []).extend(incoming)
     if args.kind == "interview" and isinstance(payload, dict) and payload.get("question"):
         update = payload["question"]
@@ -768,6 +867,13 @@ def update_coverage(args: argparse.Namespace) -> int:
             errors.append(f"{domain_id} PARTIAL requires completion_percent from 1 to 99.")
         if state == "NOT_APPLICABLE" and not (reason and (references or evidence_ids)):
             errors.append(f"{domain_id} NOT_APPLICABLE requires a reason and supporting references.")
+        for reference in references:
+            if isinstance(reference, str) and is_external_reference(reference):
+                errors.append(f"{domain_id} external inspected references require explicit scope metadata.")
+            elif isinstance(reference, dict):
+                if not reference.get("reference"):
+                    errors.append(f"{domain_id} inspected reference lacks a reference value.")
+                errors.extend(f"{domain_id} {value}" for value in external_source_errors(reference, out))
         if errors:
             continue
         records[domain_id].update({
@@ -794,6 +900,140 @@ def active_claims(out: Path) -> list[dict[str, Any]]:
     for name in ("observed_evidence.json", "interview_evidence.json"):
         claims.extend(item for item in read_json(out / name, {"claims": []}).get("claims", []) if item.get("currency", "ACTIVE") == "ACTIVE")
     return claims
+
+
+def external_source_errors(source: dict[str, Any], out: Path) -> list[str]:
+    errors: list[str] = []
+    scope = source.get("evidence_scope", "ANALYSIS_ROOT")
+    reference = str(source.get("reference", ""))
+    external_reference = is_external_reference(reference)
+    if scope not in EVIDENCE_SCOPES:
+        return [f"invalid evidence scope {scope}"]
+    if external_reference and scope != "EXTERNAL_SUPPORTING_EVIDENCE":
+        errors.append("an out-of-scope reference must be classified as EXTERNAL_SUPPORTING_EVIDENCE")
+    if scope == "EXTERNAL_SUPPORTING_EVIDENCE":
+        inventory = read_json(out / "inventory.json", {})
+        media = read_json(out / "media" / "media_index.json", {})
+        allowed = {item.get("id") for item in inventory.get("external_supporting_evidence", [])}
+        allowed.update(item.get("id") for item in media.get("items", []) if item.get("evidence_scope") == scope)
+        evidence_id = source.get("supporting_evidence_id") or source.get("media_id")
+        if evidence_id not in allowed:
+            errors.append("external evidence must reference a registered supporting_evidence_id or media_id")
+    return errors
+
+
+def is_external_reference(reference: str) -> bool:
+    return bool(
+        re.match(r"^(?:https?://|external:|[A-Za-z]:[\\/]|/)", reference, re.I)
+        or any(part == ".." for part in reference.replace("\\", "/").split("/"))
+    )
+
+
+def reconciliation_payload_errors(out: Path, claims: list[dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    source_claims = {
+        item["id"]: item for item in active_claims(out) if item.get("id")
+    }
+    represented: set[str] = set()
+    for claim in claims:
+        derived_ids = list(claim.get("derived_from_claim_ids", []))
+        if claim.get("id") in source_claims and claim["id"] not in derived_ids:
+            derived_ids.append(claim["id"])
+        represented.update(derived_ids)
+        derived = [source_claims[value] for value in derived_ids if value in source_claims]
+        source_keys = {json.dumps(source, sort_keys=True) for source in claim.get("sources", [])}
+        for source_claim in derived:
+            for source in source_claim.get("sources", []):
+                if json.dumps(source, sort_keys=True) not in source_keys:
+                    errors.append(f"Canonical claim {claim['id']} drops provenance from {source_claim['id']}.")
+        if derived:
+            weakest = min(STATUS_STRENGTH.get(value.get("status"), 0) for value in derived)
+            if STATUS_STRENGTH.get(claim.get("status"), 0) > weakest:
+                errors.append(
+                    f"Canonical claim {claim['id']} exceeds the weakest derived confidence; "
+                    "split materially different propositions or lower its status."
+                )
+            if any(value.get("status") == "CONTRADICTED" for value in derived) and claim.get("status") != "CONTRADICTED":
+                errors.append(f"Canonical claim {claim['id']} suppresses contradicted source evidence.")
+    missing = sorted(set(source_claims) - represented - {item.get("id") for item in claims})
+    if missing:
+        errors.append(f"Active source-layer claims are absent from reconciliation: {missing}")
+    return errors
+
+
+def update_video_analysis(args: argparse.Namespace) -> int:
+    project = Path(args.project).expanduser().resolve()
+    out = output_dir(project, args.output)
+    ok, error = ensure_snapshot(project, out)
+    if not ok:
+        print(error, file=sys.stderr)
+        return 2
+    payload = load_payload(args.input)
+    media = read_json(out / "media" / "media_index.json", {})
+    media_item = next((item for item in media.get("items", []) if item.get("id") == payload.get("media_id") and item.get("type") == "video"), None)
+    if not media_item:
+        print("Video analysis must reference an indexed video media_id.", file=sys.stderr)
+        return 2
+    data = read_json(out / "media" / "video_analysis.json", initial_video_analysis(media))
+    record = next((item for item in data.get("videos", []) if item.get("media_id") == media_item["id"]), None)
+    if not record:
+        print("Video analysis state is missing for the indexed video.", file=sys.stderr)
+        return 2
+    frames = {item["id"]: item for item in media_item.get("frames", [])}
+    batches = {item["id"]: item for item in media_item.get("analysis_batches", [])}
+    observed_ids = {item.get("id") for item in read_json(out / "observed_evidence.json", {}).get("claims", [])}
+    transcript_ids: set[str] = set()
+    transcript_path = media_item.get("transcript_path")
+    if transcript_path:
+        transcript_ids = {
+            item.get("id") for item in read_json(out / transcript_path, {}).get("cues", []) if item.get("id")
+        }
+    errors: list[str] = []
+    batch_id = payload.get("batch_id")
+    if batch_id and batch_id not in batches:
+        errors.append(f"Unknown video analysis batch: {batch_id}")
+    state = payload.get("analysis_state", record.get("analysis_state", "PENDING"))
+    if state not in MEDIA_ANALYSIS_STATES:
+        errors.append(f"Invalid video analysis state: {state}")
+    incoming_observations = list(payload.get("observations", []))
+    for observation in incoming_observations:
+        frame_ids = observation.get("frame_ids", [])
+        if not observation.get("id") or not observation.get("observation"):
+            errors.append("Video observations require id and observation text.")
+        if any(value not in frames for value in frame_ids):
+            errors.append(f"Video observation {observation.get('id')} references an unknown frame.")
+        if batch_id and any(value not in batches[batch_id]["frame_ids"] for value in frame_ids):
+            errors.append(f"Video observation {observation.get('id')} references a frame outside {batch_id}.")
+        if any(value not in observed_ids for value in observation.get("evidence_claim_ids", [])):
+            errors.append(f"Video observation {observation.get('id')} references unknown observed evidence.")
+        if any(value not in transcript_ids for value in observation.get("transcript_cue_ids", [])):
+            errors.append(f"Video observation {observation.get('id')} references an unknown transcript cue.")
+    if errors:
+        print(json.dumps({"errors": errors}, indent=2), file=sys.stderr)
+        return 2
+    if batch_id:
+        record.setdefault("batch_state", {})[batch_id] = payload.get("batch_state", "COMPLETE")
+    existing = {item.get("id"): item for item in record.get("observations", [])}
+    existing.update({item["id"]: item for item in incoming_observations})
+    record["observations"] = list(existing.values())
+    record["workflow_phases"] = payload.get("workflow_phases", record.get("workflow_phases", []))
+    record["limitations"] = payload.get("limitations", record.get("limitations", []))
+    record["analysis_state"] = state
+    used_frames = {value for item in record["observations"] for value in item.get("frame_ids", [])}
+    completed_frames = {
+        frame_id for saved_batch_id, batch_status in record.get("batch_state", {}).items()
+        if batch_status == "COMPLETE"
+        for frame_id in batches.get(saved_batch_id, {}).get("frame_ids", [])
+    }
+    record["timestamps_inspected"] = sorted({frames[value]["timestamp_seconds"] for value in used_frames | completed_frames})
+    record["transcript_cues_used"] = sorted({value for item in record["observations"] for value in item.get("transcript_cue_ids", [])})
+    record["evidence_claim_ids"] = sorted({value for item in record["observations"] for value in item.get("evidence_claim_ids", [])})
+    record["updated_at"] = now()
+    data["schema_version"] = SCHEMA_VERSION
+    data["updated_at"] = now()
+    atomic_json(out / "media" / "video_analysis.json", data)
+    print(json.dumps({"media_id": media_item["id"], "observations": len(record["observations"]), "analysis_state": state}, indent=2))
+    return 0
 
 
 def set_gaps(args: argparse.Namespace) -> int:
@@ -842,6 +1082,8 @@ def set_gaps(args: argparse.Namespace) -> int:
         basis_refs = list(item.get("basis_references", []))
         if not basis_ids and not basis_refs:
             errors.append(f"Gap {dimension_id} requires actual evidence/profile/coverage basis.")
+        if any(isinstance(value, str) and is_external_reference(value) for value in basis_refs):
+            errors.append(f"Gap {dimension_id} must reference external evidence through a registered claim ID.")
         unknown = [value for value in basis_ids if value not in claims]
         if unknown:
             errors.append(f"Gap {dimension_id} references unknown claims: {unknown}")
@@ -1000,6 +1242,17 @@ def set_reconciled(args: argparse.Namespace) -> int:
     payload = load_payload(args.input)
     claims = [normalize_claim(item, "canonical", session["repository_identity"]["snapshot_id"]) for item in payload_claims(payload)]
     assign_ids(claims, [])
+    errors = reconciliation_payload_errors(out, claims)
+    known_ids = {item.get("id") for item in active_claims(out)} | {item.get("id") for item in claims}
+    errors.extend(error for item in claims for error in claim_errors(item, known_ids, "canonical", out))
+    errors.extend(
+        f"{item['id']}: {error}"
+        for item in claims for source in item.get("sources", [])
+        for error in external_source_errors(source, out)
+    )
+    if errors:
+        print(json.dumps({"errors": errors}, indent=2), file=sys.stderr)
+        return 2
     atomic_json(out / "evidence.json", {"schema_version": SCHEMA_VERSION, "updated_at": now(), "authored_by": "CODEX", "claims": claims})
     session["reconciliation_ready"] = True
     invalidate_session(session)
@@ -1023,6 +1276,46 @@ def write_outputs(args: argparse.Namespace) -> int:
     payload = load_payload(args.input)
     if not isinstance(payload.get("project"), dict) or not isinstance(payload.get("dossier"), str) or not isinstance(payload.get("public_safe_summary"), str):
         print("Output payload requires project object, dossier text, and public_safe_summary text.", file=sys.stderr)
+        return 2
+    project_data = payload["project"]
+    canonical = {
+        item["id"]: item for item in read_json(out / "evidence.json", {}).get("claims", [])
+        if item.get("currency", "ACTIVE") == "ACTIVE"
+    }
+    errors: list[str] = []
+    if project_data.get("schema_version") != SCHEMA_VERSION:
+        errors.append(f"project must declare schema_version {SCHEMA_VERSION}.")
+    missing = [key for key in CORE_KEYS if key not in project_data]
+    if missing:
+        errors.append(f"project is missing universal core keys: {', '.join(missing)}")
+    summaries = project_data.get("semantic_summary")
+    if not isinstance(summaries, dict):
+        errors.append("project requires a semantic_summary object.")
+    else:
+        for section, entries in summaries.items():
+            if not isinstance(entries, list):
+                errors.append(f"semantic_summary.{section} must be a list.")
+                continue
+            for entry in entries:
+                linked = entry.get("evidence_claim_ids", [])
+                if not isinstance(entry.get("statement"), str) or not entry.get("statement", "").strip():
+                    errors.append(f"semantic_summary.{section} contains an entry without a statement.")
+                if not isinstance(entry.get("dimensions"), list):
+                    errors.append(f"semantic_summary.{section} contains an entry without dimensions.")
+                if not linked or any(value not in canonical for value in linked):
+                    errors.append(f"semantic_summary.{section} contains an untraceable entry.")
+                statuses = {canonical[value]["status"] for value in linked if value in canonical}
+                if entry.get("status") not in statuses:
+                    errors.append(f"semantic_summary.{section} exceeds or disagrees with linked evidence status.")
+    omitted = [value for value in canonical if value not in payload["dossier"]]
+    if omitted:
+        errors.append(f"dossier omits active canonical evidence: {omitted}")
+    for claim_id in set(re.findall(r"\b[A-Z]+-\d{3,}\b", payload["public_safe_summary"])):
+        claim = canonical.get(claim_id)
+        if not claim or not claim.get("public_safe") or claim.get("sensitive") or claim.get("status") not in {"CONFIRMED", "USER_CONFIRMED"}:
+            errors.append(f"public_safe_summary contains unsafe or unsupported claim {claim_id}.")
+    if errors:
+        print(json.dumps({"errors": errors}, indent=2), file=sys.stderr)
         return 2
     atomic_json(out / "project.json", payload["project"])
     atomic_text(out / "dossier.md", payload["dossier"].rstrip() + "\n")
@@ -1067,7 +1360,7 @@ def set_interview_state(args: argparse.Namespace) -> int:
     return 0
 
 
-def claim_errors(item: dict[str, Any], id_set: set[str], prefix: str) -> list[str]:
+def claim_errors(item: dict[str, Any], id_set: set[str], prefix: str, out: Path | None = None) -> list[str]:
     errors = []
     claim_id = item.get("id", "<missing>")
     if not re.fullmatch(r"[A-Z]+-\d{3,}", str(claim_id)):
@@ -1102,6 +1395,8 @@ def claim_errors(item: dict[str, Any], id_set: set[str], prefix: str) -> list[st
             errors.append(f"{claim_id} uses a cached path as media provenance")
         if is_sensitive(reference) and (not item.get("sensitive") or item.get("public_safe")):
             errors.append(f"{claim_id} references a sensitive path without sensitive handling")
+        if out:
+            errors.extend(f"{claim_id} {value}" for value in external_source_errors(source, out))
     if item.get("status") == "USER_ESTIMATE" and any(source.get("type") != "USER_ESTIMATE" for source in sources):
         errors.append(f"{claim_id} user estimate has non-estimate provenance")
     if item.get("category") == "ownership" and item.get("status") in {"CONFIRMED", "USER_CONFIRMED"}:
@@ -1134,6 +1429,7 @@ def validation_errors(out: Path) -> tuple[list[str], list[str]]:
         "project.json", "observed_evidence.json", "interview_evidence.json", "evidence.json",
         "session.json", "project_profile.json", "analysis_plan.json", "analysis_coverage.json",
         "gap_analysis.json", "media/media_index.json",
+        "media/video_analysis.json",
     ]
     parsed = {}
     for name in names:
@@ -1169,6 +1465,11 @@ def validation_errors(out: Path) -> tuple[list[str], list[str]]:
             errors.append(f"{domain_id} PARTIAL has invalid completion percentage.")
         if state == "NOT_APPLICABLE" and not (record.get("reason") and (record.get("inspected_references") or record.get("evidence_claim_ids"))):
             errors.append(f"{domain_id} NOT_APPLICABLE lacks justification.")
+        for reference in record.get("inspected_references", []):
+            if isinstance(reference, str) and is_external_reference(reference):
+                errors.append(f"{domain_id} has an unclassified external inspected reference.")
+            elif isinstance(reference, dict):
+                errors.extend(f"{domain_id} {value}" for value in external_source_errors(reference, out))
         if state in {"PARTIAL", "BLOCKED"}:
             warnings.append(f"Coverage limitation: {domain_id} is {state}: {record.get('reason')}")
     observed = parsed.get("observed_evidence.json", {}).get("claims", [])
@@ -1193,7 +1494,7 @@ def validation_errors(out: Path) -> tuple[list[str], list[str]]:
             errors.append(f"Coverage domain {domain_id} references unknown evidence IDs: {unknown_ids}")
     for prefix, claims in (("observed", observed), ("interview", interview), ("canonical", canonical)):
         for item in claims:
-            errors.extend(claim_errors(item, id_set, prefix))
+            errors.extend(claim_errors(item, id_set, prefix, out))
     active_inputs = [item for item in observed + interview if item.get("currency", "ACTIVE") == "ACTIVE"]
     represented = set()
     canonical_by_id = {}
@@ -1217,6 +1518,10 @@ def validation_errors(out: Path) -> tuple[list[str], list[str]]:
                     errors.append(f"Canonical claim {item['id']} drops provenance from {source_claim['id']}.")
             if source_claim.get("status") == "USER_ESTIMATE" and item.get("status") != "USER_ESTIMATE":
                 errors.append(f"Canonical claim {item['id']} promotes user estimate {source_claim['id']}.")
+        if derived:
+            weakest = min(STATUS_STRENGTH.get(value.get("status"), 0) for value in derived)
+            if STATUS_STRENGTH.get(item.get("status"), 0) > weakest:
+                errors.append(f"Canonical claim {item['id']} exceeds the weakest derived confidence.")
     project_data = parsed.get("project.json", {})
     if project_data.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"project.json must declare schema_version {SCHEMA_VERSION}.")
@@ -1280,6 +1585,32 @@ def validation_errors(out: Path) -> tuple[list[str], list[str]]:
                 errors.append(f"Video frame for {item.get('id')} lacks canonical source or timestamp provenance.")
             if not frame.get("path") or not (out / str(frame.get("path"))).is_file():
                 errors.append(f"Video frame for {item.get('id')} is missing from the analysis directory.")
+            if not frame.get("id") or frame.get("timestamp_method") != "decoded_pts":
+                errors.append(f"Video frame for {item.get('id')} lacks a stable ID or decoded timestamp.")
+        frame_ids = {frame.get("id") for frame in item.get("frames", [])}
+        for batch in item.get("analysis_batches", []):
+            if not batch.get("frame_ids") or len(batch["frame_ids"]) > 8 or any(value not in frame_ids for value in batch["frame_ids"]):
+                errors.append(f"Video analysis batch {batch.get('id')} for {item.get('id')} is invalid.")
+    video_analysis = parsed.get("media/video_analysis.json", {})
+    media_by_id = {item.get("id"): item for item in media.get("items", []) if item.get("type") == "video"}
+    observed_ids = {item.get("id") for item in observed}
+    analysis_ids = {item.get("media_id") for item in video_analysis.get("videos", [])}
+    if analysis_ids != set(media_by_id):
+        errors.append("video_analysis.json does not exactly represent the indexed videos.")
+    for record in video_analysis.get("videos", []):
+        media_item = media_by_id.get(record.get("media_id"))
+        if not media_item or record.get("source") != media_item.get("source"):
+            errors.append(f"Video analysis {record.get('media_id')} is not bound to indexed media.")
+            continue
+        frame_ids = {frame.get("id") for frame in media_item.get("frames", [])}
+        frame_timestamps = {frame.get("timestamp_seconds") for frame in media_item.get("frames", [])}
+        if any(value not in frame_timestamps for value in record.get("timestamps_inspected", [])):
+            errors.append(f"Video analysis {record.get('media_id')} contains an unindexed timestamp.")
+        for observation in record.get("observations", []):
+            if any(value not in frame_ids for value in observation.get("frame_ids", [])):
+                errors.append(f"Video observation {observation.get('id')} references an unindexed frame.")
+            if any(value not in observed_ids for value in observation.get("evidence_claim_ids", [])):
+                errors.append(f"Video observation {observation.get('id')} references unknown evidence.")
     return errors, warnings
 
 
@@ -1353,12 +1684,14 @@ def parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("project")
     analyze_parser.add_argument("--output")
     analyze_parser.add_argument("--media", action="append", default=[])
+    analyze_parser.add_argument("--supporting-evidence", action="append", default=[])
     analyze_parser.add_argument("--deep", action="store_true")
     analyze_parser.add_argument("--static", action="store_true")
     analyze_parser.set_defaults(handler=analyze)
     input_commands = {
         "set-plan": set_plan, "update-coverage": update_coverage, "set-gaps": set_gaps,
         "queue-question": queue_question, "set-reconciled": set_reconciled, "write-outputs": write_outputs,
+        "update-video-analysis": update_video_analysis,
     }
     for name, handler in input_commands.items():
         command = commands.add_parser(name)

@@ -14,6 +14,8 @@ Every claim retains `id`, `category`, `claim`, approved `status`, `sources`, `ca
 
 Use project-relative artifact references. Remote media evidence must use the original URL as `reference`; behavioral video evidence also needs `timestamp_seconds` and may include title.
 
+Artifact sources inside `ANALYSIS_ROOT` use `evidence_scope: ANALYSIS_ROOT`. Explicit parent/sibling files and remote or out-of-root media use `evidence_scope: EXTERNAL_SUPPORTING_EVIDENCE` plus their registered `supporting_evidence_id` or `media_id`. External evidence may support a project claim but is never project content.
+
 Observed and canonical claims must supply `status` explicitly; an omitted, null, or blank status is invalid and is never promoted to `CONFIRMED`. Interview-path claims may retain the intentional `USER_CONFIRMED` default and question-based user provenance.
 
 `SOURCE_CODE`, `TEST`, `CONFIG`, `BUILD_OR_PACKAGE_METADATA`, `GIT_HISTORY`, `DOCUMENTATION`, `SCREENSHOT`, and `VIDEO` sources require a non-empty string `reference` identifying the artifact. `USER_ATTESTATION` and `USER_ESTIMATE` continue to use interview-question provenance and are not required to provide a file path.
@@ -24,7 +26,9 @@ Source types remain `SOURCE_CODE`, `TEST`, `CONFIG`, `BUILD_OR_PACKAGE_METADATA`
 
 ## Reconciliation
 
-Codex authors canonical reconciliation. Retain all material sources and link every canonical claim to represented observed/interview claim IDs. Never promote an estimate, discard a contradiction, infer personal ownership from Git, or claim runtime success from static evidence. The helper validates these invariants but does not choose semantic winners.
+Codex authors canonical reconciliation. Retain all material sources and link every canonical claim to represented observed/interview claim IDs. Never promote an estimate, discard a contradiction, infer personal ownership from Git, or claim runtime success from static evidence. Split claims when material propositions have different confidence; otherwise the canonical status cannot exceed the weakest derived claim. The helper validates these invariants but does not choose semantic winners.
+
+Use [synthesis-contracts.json](synthesis-contracts.json) for concise accepted payload shapes.
 
 ## Project model
 

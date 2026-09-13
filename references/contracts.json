@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Repo-Portfolio evidence contract vocabulary",
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "supported_python": ">=3.9",
   "responsibility_boundary": {
     "helper": [
@@ -29,6 +29,8 @@
       "SOURCE_CODE", "TEST", "CONFIG", "BUILD_OR_PACKAGE_METADATA",
       "GIT_HISTORY", "DOCUMENTATION", "SCREENSHOT", "VIDEO"
     ],
+    "evidence_scopes": ["ANALYSIS_ROOT", "EXTERNAL_SUPPORTING_EVIDENCE"],
+    "mixed_confidence_rule": "A canonical claim cannot be stronger than its weakest derived source claim; split materially different propositions.",
     "id_pattern": "^[A-Z]+-[0-9]{3,}$",
     "statuses": [
       "CONFIRMED", "USER_CONFIRMED", "USER_ESTIMATE", "STRONG_INFERENCE",
@@ -39,7 +41,12 @@
       "SOURCE_CODE", "TEST", "CONFIG", "BUILD_OR_PACKAGE_METADATA",
       "GIT_HISTORY", "DOCUMENTATION", "SCREENSHOT", "VIDEO",
       "USER_ATTESTATION", "USER_ESTIMATE", "INFERENCE"
-    ]
+    ],
+    "artifact_source_scope": {
+      "field": "evidence_scope",
+      "values": ["ANALYSIS_ROOT", "EXTERNAL_SUPPORTING_EVIDENCE"],
+      "external_id_fields": ["supporting_evidence_id", "media_id"]
+    }
   },
   "analysis_coverage": {
     "states": ["PENDING", "COMPLETE", "PARTIAL", "NOT_APPLICABLE", "BLOCKED"],
@@ -63,7 +70,9 @@
     ],
     "remote_canonical_source": "original_url",
     "video_evidence_requires_timestamp": true,
-    "cache_scope": "analysis_working_directory"
+    "cache_scope": "analysis_working_directory",
+    "video_analysis_artifact": "media/video_analysis.json",
+    "maximum_frames_per_batch": 8
   },
   "project_required_keys": [
     "project", "problem", "users", "workflows", "technology", "architecture",
@@ -79,6 +88,7 @@
   "required_outputs": [
     "dossier.md", "project.json", "observed_evidence.json",
     "interview_evidence.json", "evidence.json", "open_questions.md",
-    "public_safe_summary.md", "media/media_index.json", "media/extracted_frames/"
+    "public_safe_summary.md", "media/media_index.json", "media/video_analysis.json",
+    "media/extracted_frames/"
   ]
 }

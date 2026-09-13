@@ -13,7 +13,7 @@ description: >-
 
 Recover the maximum defensible technical and contextual evidence from a project. Keep artifact observations, testimony, estimates, inference, contradictions, and unknowns distinct.
 
-Read [references/workflow.md](references/workflow.md) completely before a run. Read [references/evidence-contract.md](references/evidence-contract.md) before writing claims or outputs. Read [references/interview-guide.md](references/interview-guide.md) before generating gaps or questions. See [references/usage.md](references/usage.md) for installation, modes, media, outputs, and requirements.
+Read [references/workflow.md](references/workflow.md) completely before a run. Read [references/evidence-contract.md](references/evidence-contract.md) and [references/synthesis-contracts.json](references/synthesis-contracts.json) before writing claims or outputs. Read [references/interview-guide.md](references/interview-guide.md) before generating gaps or questions. See [references/usage.md](references/usage.md) for installation, modes, media, outputs, and requirements.
 
 ## Maintain the responsibility boundary
 
@@ -23,12 +23,14 @@ Codex must perform semantic investigation, dynamic planning, architectural/domai
 
 Never execute project-owned or downloaded code, builds, tests, installers, package managers, hooks, containers, migrations, or binaries. Read files and use read-only Git commands only. Explicit runtime verification is a separate workflow.
 
+Treat the user-supplied directory as immutable `ANALYSIS_ROOT`. A discovered parent `GIT_ROOT` is metadata-only and never widens analysis. Do not create, edit, or delete anything in the repository hierarchy outside `ANALYSIS_ROOT/.repo-portfolio/`; place every temporary JSON payload under `.repo-portfolio/work/`. Use parent or sibling files only when registered through `--supporting-evidence` or when the user reruns with an explicitly wider analysis root.
+
 ## Run the workflow
 
 1. Resolve the project root and any repeated `--media` inputs. Run discovery:
 
    ```bash
-   python3 <skill-dir>/scripts/repo_portfolio.py analyze <project-root> [--media <path-or-url>] [--deep] [--static]
+   python3 <skill-dir>/scripts/repo_portfolio.py analyze <analysis-root> [--media <path-or-url>] [--supporting-evidence <file>] [--deep] [--static]
    ```
 
 2. Interpret `inventory.json`, `project_profile.json`, Git facts, and the media index. Create a project-specific plan payload, then persist it:
@@ -41,6 +43,12 @@ Never execute project-owned or downloaded code, builds, tests, installers, packa
 
    ```bash
    python3 <skill-dir>/scripts/repo_portfolio.py ingest <project-root> --kind observed --input <claims.json>
+   ```
+
+   For video, inspect `media_index.json` batches of at most eight frames. Combine frames with available transcript cues and persist each completed batch before continuing:
+
+   ```bash
+   python3 <skill-dir>/scripts/repo_portfolio.py update-video-analysis <analysis-root> --input <video-update.json>
    ```
 
 4. Record every domain as `COMPLETE`, `PARTIAL`, `NOT_APPLICABLE`, or `BLOCKED`. Give reasons for `PARTIAL` and `BLOCKED` and a reason/evidence basis for `NOT_APPLICABLE`:
@@ -58,7 +66,7 @@ Never execute project-owned or downloaded code, builds, tests, installers, packa
    ```
 
 6. Ask exactly the returned question. Interpret the answer into short user claims and dimensions, then ingest it. Recompute meaningful gaps after every answer. Accept “unknown” without invention.
-7. Reconcile observed and interview evidence semantically. Preserve every material source, estimate, and unresolved contradiction, then persist Codex's canonical payload:
+7. Reconcile observed and interview evidence semantically. Split materially different propositions when their confidence differs; a combined claim cannot be stronger than its weakest proposition. Preserve every material source, estimate, and unresolved contradiction, then persist Codex's canonical payload:
 
    ```bash
    python3 <skill-dir>/scripts/repo_portfolio.py set-reconciled <project-root> --input <evidence.json>

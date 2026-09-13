@@ -12,6 +12,8 @@
 
 Modes remain default, static, deep, media, and resume. Static skips the interview but not semantic artifact investigation. Deep expands scan and investigation scope. Resume is allowed only after repository compatibility checks.
 
+`ANALYSIS_ROOT` is always the exact user-supplied directory. `GIT_ROOT` may be a parent but is used only to run path-scoped Git queries. Never inspect parent or sibling content unless it is explicitly registered as external supporting evidence. Never write within the repository outside `ANALYSIS_ROOT/.repo-portfolio/`.
+
 ## Dynamic plan
 
 Create the plan after reading deterministic discovery outputs. Include only relevant domains. Every domain needs an ID, priority (`high`, `medium`, or `low`), evidence-based reason, and focused investigation targets. Unknown ecosystems need an ad-hoc investigation brief based on observed conventions.
@@ -32,6 +34,8 @@ Persist the plan before investigation. The helper creates matching `PENDING` cov
 Prioritize entry points, workflows, component boundaries, domain transformations, tests and asserted behavior, delivery/configuration, Git evolution, reliability patterns, and media-visible behavior. Never claim runtime success from static artifacts.
 
 Do not inspect generated/vendor directories unless they are relevant evidence. Do not copy credentials, private data, tokens, or large proprietary excerpts into outputs.
+
+For each video, use periodic frames for full-duration coverage and scene/transcript cues as supplements. Inspect the precomputed batches and persist observations to `media/video_analysis.json` after every batch so compaction cannot erase prior findings.
 
 ## Completion
 

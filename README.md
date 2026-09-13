@@ -11,6 +11,8 @@
 
 The normal invocation performs full analysis. Use static mode to skip the interview, deep mode for broader investigation, media input for extra images or videos, and run the skill again to resume compatible saved state.
 
+The directory you supply remains the analysis boundary. Use `--supporting-evidence <file>` for an explicit parent or sibling document without widening it. Repository outputs and working files stay under that directory's `.repo-portfolio/` folder.
+
 Video preprocessing optionally uses `ffmpeg` and `ffprobe`. YouTube retrieval optionally uses `yt-dlp`.
 
 ## What it is

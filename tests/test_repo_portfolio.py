@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import http.server
 import json
 import os
@@ -14,6 +15,7 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "repo_portfolio.py"
 README = Path(__file__).parents[1] / "README.md"
+SYNTHESIS_CONTRACTS = Path(__file__).parents[1] / "references" / "synthesis-contracts.json"
 PYTHON = os.environ.get("REPO_PORTFOLIO_PYTHON", shutil.which("python3.12") or shutil.which("python3") or "python3")
 CORE_KEYS = [
     "project", "problem", "users", "workflows", "technology", "architecture",
@@ -138,7 +140,7 @@ class RepoPortfolioBehaviorTests(unittest.TestCase):
             "gaps": [],
         })
         self.command("set-reconciled", {"claims": [claim]})
-        project = {"schema_version": "1.1", **{key: [] for key in CORE_KEYS}}
+        project = {"schema_version": "1.2", **{key: [] for key in CORE_KEYS}}
         project["project"] = {"name": "Example"}
         project["semantic_summary"] = {
             "architecture": [{
@@ -459,13 +461,13 @@ class RepoPortfolioBehaviorTests(unittest.TestCase):
         self.analyze("--static")
         self.assertEqual(self.read("session.json")["compatibility"], "CHANGED")
 
-    def make_video(self, path: Path) -> None:
+    def make_video(self, path: Path, duration: int = 4, rate: int = 2) -> None:
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             self.skipTest("ffmpeg is unavailable")
         result = subprocess.run([
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-            "testsrc=size=128x72:rate=2", "-t", "4", "-c:v", "mpeg4", str(path),
+            f"testsrc=size=128x72:rate={rate}", "-t", str(duration), "-c:v", "mpeg4", str(path),
         ], capture_output=True, text=True)
         if result.returncode:
             self.skipTest(f"ffmpeg cannot create the test video: {result.stderr}")
@@ -700,6 +702,175 @@ class RepoPortfolioBehaviorTests(unittest.TestCase):
         self.assertTrue(text.startswith("# repo-portfolio\n\n## HOW TO USE IT"))
         self.assertLess(text.index("## HOW TO USE IT"), text.index("## What it is"))
         self.assertLessEqual(len(text.splitlines()), 30)
+
+    def test_output_cannot_escape_analysis_directory(self) -> None:
+        self.write("src/main.py", "print('safe')")
+        outside = self.base / "elsewhere"
+        result = self.run_tool("analyze", str(self.root), "--output", str(outside), check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Analysis output must be exactly", result.stderr)
+        self.assertFalse(outside.exists())
+
+        link = self.root / ".repo-portfolio"
+        link.symlink_to(outside, target_is_directory=True)
+        escaped = self.run_tool("analyze", str(self.root), check=False)
+        self.assertNotEqual(escaped.returncode, 0)
+        self.assertIn("must not be a symlink", escaped.stderr)
+        self.assertFalse(outside.exists())
+
+    def test_analysis_does_not_modify_repository_outside_output_tree(self) -> None:
+        self.write("src/main.py", "print('unchanged')")
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(["git", "add", "src/main.py"], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "initial"], cwd=self.root, check=True)
+
+        def snapshot() -> dict[str, str]:
+            return {
+                path.relative_to(self.root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in self.root.rglob("*")
+                if path.is_file() and ".repo-portfolio" not in path.relative_to(self.root).parts
+            }
+
+        before = snapshot()
+        self.analyze("--static")
+        self.assertEqual(snapshot(), before)
+
+    def test_subtree_git_history_is_scoped_and_sibling_changes_do_not_stale_it(self) -> None:
+        mono = self.base / "mono"
+        target = mono / "24" / "MetalFarm"
+        sibling = mono / "25" / "Other"
+        target.mkdir(parents=True)
+        sibling.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=mono, check=True)
+        (target / "main.cs").write_text("class Main {}", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=mono, check=True)
+        subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "target commit"], cwd=mono, check=True)
+        (sibling / "other.cs").write_text("class Other {}", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=mono, check=True)
+        subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "sibling commit"], cwd=mono, check=True)
+
+        self.run_tool("analyze", str(target), "--static")
+        out = target / ".repo-portfolio"
+        session = json.loads((out / "session.json").read_text())
+        history = json.loads((out / "git_history.json").read_text())
+        inventory = json.loads((out / "inventory.json").read_text())
+        self.assertEqual(Path(session["analysis_root"]), target.resolve())
+        self.assertEqual(Path(session["git_root"]), mono.resolve())
+        self.assertEqual(history["git_pathspec"], "24/MetalFarm")
+        self.assertEqual([item["subject"] for item in history["recent_commits"]], ["target commit"])
+        self.assertEqual({item["path"] for item in inventory["files"]}, {"main.cs"})
+
+        (sibling / "other.cs").write_text("class Other { int x; }", encoding="utf-8")
+        subprocess.run(["git", "add", "25/Other/other.cs"], cwd=mono, check=True)
+        subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "second sibling commit"], cwd=mono, check=True)
+        self.run_tool("analyze", str(target), "--static")
+        self.assertEqual(json.loads((out / "session.json").read_text())["compatibility"], "EXACT")
+
+    def test_explicit_parent_document_is_external_supporting_evidence(self) -> None:
+        self.write("src/main.py", "print('project')")
+        parent_doc = self.base / "architecture.md"
+        parent_doc.write_text("Shared deployment context", encoding="utf-8")
+        self.analyze("--static", "--supporting-evidence", str(parent_doc))
+        inventory = self.read("inventory.json")
+        support = inventory["external_supporting_evidence"][0]
+        self.assertEqual(support["scope"] if "scope" in support else support["evidence_scope"], "EXTERNAL_SUPPORTING_EVIDENCE")
+        self.assertNotIn("architecture.md", {item["path"] for item in inventory["files"]})
+        rejected = self.run_tool(
+            "ingest", str(self.root), "--kind", "observed", "--input",
+            str(self.payload("unregistered-parent.json", [{
+                "category": "documentation", "claim": "Unregistered external material.",
+                "status": "CONFIRMED", "sources": [{
+                    "type": "DOCUMENTATION", "reference": str(parent_doc),
+                    "evidence_scope": "EXTERNAL_SUPPORTING_EVIDENCE",
+                }],
+            }])), check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("registered supporting_evidence_id or media_id", rejected.stderr)
+        claim = self.ingest_claim(
+            category="documentation", claim="The supplied document describes shared deployment context.",
+            sources=[{
+                "type": "DOCUMENTATION", "reference": str(parent_doc),
+                "evidence_scope": "EXTERNAL_SUPPORTING_EVIDENCE",
+                "supporting_evidence_id": support["id"],
+            }],
+        )
+        self.assertEqual(claim["sources"][0]["supporting_evidence_id"], support["id"])
+
+    def test_mixed_confidence_canonical_claim_cannot_be_overpromoted(self) -> None:
+        self.write("package.json", '{"enabled":"2024"}')
+        self.analyze("--static")
+        self.set_plan([{"id": "D-PACK", "priority": "high", "reason": "Packaging exists.", "focus": ["versions"]}])
+        artifact = self.ingest_claim(
+            category="configuration", claim="Current packaging enables version 2024.",
+            sources=[{"type": "BUILD_OR_PACKAGE_METADATA", "reference": "package.json"}],
+        )
+        user_payload = [{
+            "category": "testing", "claim": "Historical testing covered versions 2024 and 2025.",
+            "status": "USER_CONFIRMED", "interview_question_id": "Q-VERSIONS",
+        }]
+        self.run_tool("ingest", str(self.root), "--kind", "interview", "--input", str(self.payload("versions.json", user_payload)))
+        user = self.read("interview_evidence.json")["claims"][0]
+        self.finish_domain("D-PACK", claims=[artifact["id"]])
+        merged = {
+            "category": "configuration", "claim": "Packaging and historical testing covered 2024 and 2025.",
+            "status": "CONFIRMED", "sources": artifact["sources"] + user["sources"],
+            "derived_from_claim_ids": [artifact["id"], user["id"]],
+        }
+        result = self.command_result("set-reconciled", {"claims": [merged]})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("weakest derived confidence", result.stderr)
+        self.command("set-reconciled", {"claims": [artifact, user]})
+        self.assertEqual({item["status"] for item in self.read("evidence.json")["claims"]}, {"CONFIRMED", "USER_CONFIRMED"})
+
+    def test_duration_aware_video_sampling_and_incremental_persistence(self) -> None:
+        self.write("src/main.py", "print('video')")
+        video = self.base / "three-minute-demo.mp4"
+        self.make_video(video, duration=180, rate=1)
+        self.analyze("--static", "--media", str(video))
+        item = next(value for value in self.read("media/media_index.json")["items"] if value["type"] == "video")
+        periodic = [frame for frame in item["frames"] if "periodic" in frame["sampling_methods"]]
+        self.assertGreaterEqual(len(periodic), 29)
+        self.assertLessEqual(len(item["frames"]), 45)
+        self.assertLess(periodic[0]["timestamp_seconds"], 2)
+        self.assertGreater(periodic[-1]["timestamp_seconds"], 165)
+        self.assertTrue(all(len(batch["frame_ids"]) <= 8 for batch in item["analysis_batches"]))
+        first_batch = item["analysis_batches"][0]
+        frame_id = first_batch["frame_ids"][0]
+        self.command("update-video-analysis", {
+            "media_id": item["id"], "batch_id": first_batch["id"],
+            "analysis_state": "IN_PROGRESS", "observations": [{
+                "id": "VIDEO-OBS-001", "observation": "The demo shows a software interface.",
+                "frame_ids": [frame_id], "transcript_cue_ids": [], "evidence_claim_ids": [],
+            }],
+        })
+        state = self.read("media/video_analysis.json")["videos"][0]
+        self.assertEqual(state["batch_state"][first_batch["id"]], "COMPLETE")
+        self.assertEqual(len(state["timestamps_inspected"]), len(first_batch["frame_ids"]))
+        self.analyze("--static")
+        resumed = self.read("media/video_analysis.json")["videos"][0]
+        self.assertEqual(resumed["observations"][0]["id"], "VIDEO-OBS-001")
+
+    def test_synthesis_contracts_are_machine_readable_and_failed_preflight_is_non_destructive(self) -> None:
+        templates = json.loads(SYNTHESIS_CONTRACTS.read_text(encoding="utf-8"))
+        self.assertEqual(templates["schema_version"], "1.2")
+        self.assertIn("canonical_claim", templates)
+        self.assertIn("gap_resolution", templates)
+        self.assertIn("analysis_coverage", templates)
+        self.assertIn("project_json", templates)
+        self.assertIn("final_synthesis_inputs", templates)
+
+        self.complete_static_workflow()
+        prior_project = (self.out / "project.json").read_bytes()
+        prior_dossier = (self.out / "dossier.md").read_bytes()
+        result = self.command_result("write-outputs", {
+            "project": {"schema_version": "1.2"},
+            "dossier": "invalid replacement",
+            "public_safe_summary": "invalid replacement",
+        })
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.out / "project.json").read_bytes(), prior_project)
+        self.assertEqual((self.out / "dossier.md").read_bytes(), prior_dossier)
 
 
 if __name__ == "__main__":

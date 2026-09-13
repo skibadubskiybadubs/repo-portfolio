@@ -14,12 +14,13 @@ Run `$repo-portfolio` inside a project or provide a project path. Optional inten
 - `--deep`: expand scan and semantic investigation depth.
 - Resume intent: rerun the same invocation; exact snapshots continue persisted state after compatibility checks.
 - `--media <value>`: add a local image/video, local directory, direct HTTP/HTTPS media URL, or YouTube URL. Repeat as needed.
+- `--supporting-evidence <file>`: register an explicitly supplied parent or sibling document as external supporting evidence without widening the analysis root. Repeat as needed.
 
 Remote files are cached only under `.repo-portfolio/media/cache/`. Direct images are limited to 25 MiB and direct/YouTube videos to 500 MiB. MIME type and file signatures are checked, private-network destinations and HTML pages are rejected, redirects are bounded, and links inside pages are never followed. The original URL—not the cached filename—remains canonical provenance. YouTube retrieval requires no login and reports private, deleted, restricted, blocked, DRM-protected, or otherwise unavailable videos as warnings rather than aborting the project analysis.
 
 ## Outputs
 
-The `.repo-portfolio/` directory contains the dossier, universal project model, observed/interview/canonical evidence stores, prioritized open questions, public-safe summary, media index/frames, analysis plan and coverage, gap analysis, session state, and validation result.
+The `.repo-portfolio/` directory contains the dossier, universal project model, observed/interview/canonical evidence stores, prioritized open questions, public-safe summary, media index/frames and incremental video analysis, analysis plan and coverage, gap analysis, session state, and validation result. Repo-Portfolio does not modify repository files outside this directory.
 
 ## Safety
 
