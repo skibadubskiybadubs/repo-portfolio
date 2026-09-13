@@ -15,6 +15,34 @@ The directory you supply remains the analysis boundary. Use `--supporting-eviden
 
 Video preprocessing optionally uses `ffmpeg` and `ffprobe`. YouTube retrieval optionally uses `yt-dlp`.
 
+## Example usage
+
+```bash
+$repo-portfolio
+
+Run a full analysis of this project.
+
+Additional evidence:
+
+Demo video:
+https://www.youtube.com/watch?v=ABC123XYZ
+
+Additional screenshots:
+~/PortfolioEvidence/MyTool/screenshots/
+
+Additional local demo:
+~/PortfolioEvidence/MyTool/demo-old.mp4
+
+Use all available repository, Git, documentation and media evidence.
+
+First investigate everything that can be established from artifacts.
+Then interview me one question at a time only about high-value context that
+cannot be reliably determined from those sources.
+
+The goal is the most complete defensible project evidence dossier possible,
+not a CV or portfolio yet.
+```
+
 ## What it is
 
 `repo-portfolio` analyzes a software project, repository, Git history, documentation, and supplied media, then asks targeted questions for context that artifacts cannot prove. It produces evidence-backed structured data for later portfolio case studies, CV/resume generation, VitaeContext or other career knowledge bases, role/seniority analysis, and pricing or consulting analysis. It does not generate the final CV or portfolio itself.
